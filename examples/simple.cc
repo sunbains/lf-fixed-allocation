@@ -82,9 +82,9 @@ int main() {
   data[3] = User_data(4, "Delhi");
   
   for (int i{}; i < 4; ++i) {
-    list->push_back(data[i].m_node);
+    list->push_back(data[i]);
   }
-  
+
   std::cout << "1. Basic Iterator Usage\n" << std::string(50, '-') << "\n";
 
   print_forward(*list);
@@ -119,4 +119,3 @@ int main() {
   
   return 0;
 }
-
