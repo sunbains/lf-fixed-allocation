@@ -33,6 +33,10 @@ struct Node {
     return m_links.load(std::memory_order_relaxed) == NULL_LINK;
   }
 
+  void invalidate() noexcept {
+    m_links.store(NULL_LINK, std::memory_order_relaxed);
+  }
+
   /** Atomic links storage, both next and prev links are stored in a single 64-bit integer */
   std::atomic<uint64_t> m_links{NULL_LINK};
 };
@@ -142,7 +146,7 @@ struct List_iterator {
     auto prev_links = unpack_links(m_prev->m_links.load(std::memory_order_acquire));
     auto prev = to_node(prev_links.second);
 
-    // Validate prev node hasn't been removed
+    /* Validate prev node hasn't been removed */
     if (to_node(prev_links.first) != m_current) [[unlikely]] {
       while (m_prev != nullptr && to_node(prev_links.first) != m_current && retries++ < node_type::MAX_RETRIES) [[likely]] {
         m_prev = to_node(prev_links.second);
@@ -308,6 +312,7 @@ struct List {
       }
 
       if (success) {
+        node.invalidate();
         return to_item(node);
       }
 
