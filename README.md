@@ -83,16 +83,16 @@ The repository includes comprehensive benchmarks measuring:
 
 ### Build Instructions
 
+All binary files will be added to the bin/ directory. Make sure it exists.
+
 ```bash
 mkdir build && cd build
 cmake ..
 make
 
-# Run tests
-./tests/list_tests
+# Run tests and benchmarks
+./bin/<binary_name>
 
-# Run benchmarks
-./benchmarks/list_benchmarks
 ```
 
 ### CMake Integration
