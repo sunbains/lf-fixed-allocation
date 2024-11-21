@@ -28,17 +28,10 @@ A high-performance lock-free doubly linked list implementation in modern C++. Th
 
 // Define your data structure
 struct My_data {
-    struct Node {
-        Node() = default;
-        Node(Node&& rhs) noexcept = default;
-        Node& operator=(Node&& rhs) noexcept = default;
-    };
-
-    Node& node() noexcept { return m_node; }
-    const Node& node() const noexcept { return m_node; }
+    ut::Node& node() noexcept { return m_node; }
 
     int m_value{};
-    Node m_node{};
+    ut::Node m_node{};
 };
 
 // Create a list
