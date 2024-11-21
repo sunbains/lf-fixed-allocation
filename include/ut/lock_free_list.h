@@ -346,6 +346,7 @@ struct List {
             if (head_retries++ >= Node::MAX_RETRIES) {
               /* Failed to update old head, try to restore state */
               m_head.store(old_head_link, std::memory_order_release);
+	      node.invalidate();
               return false;
             }
             
@@ -362,6 +363,7 @@ struct List {
       }
     }
 
+    node.invalidate();
     return false;
   }
 
@@ -386,6 +388,7 @@ struct List {
           do {
             if (tail_retries++ >= Node::MAX_RETRIES) {
               m_tail.store(old_tail_link, std::memory_order_release);
+	      node.invalidate();
               return false;
             }
             
@@ -402,6 +405,7 @@ struct List {
       }
     }
 
+    node.invalidate();
     return false;
   }
 
@@ -422,6 +426,7 @@ struct List {
 
       if (node_links == Node::NULL_LINK) [[unlikely]] {
         /* Node was removed */
+        new_node.invalidate();
         return false;
       }
 
@@ -441,6 +446,7 @@ struct List {
             if (next_retries++ >= Node::MAX_RETRIES) {
               /* Restore original node links */
               node.m_links.store(node_links, std::memory_order_release);
+	      new_node.invalidate();
               return false;
             }
 
@@ -463,6 +469,7 @@ struct List {
       }
     }
 
+    new_node.invalidate();
     return false;
   }
 
@@ -478,6 +485,7 @@ struct List {
 
       if (node_links == Node::NULL_LINK) [[unlikely]] {
         /* Node was removed */
+        new_node.invalidate();
         return false;
       }
 
@@ -497,6 +505,7 @@ struct List {
             if (prev_retries++ >= Node::MAX_RETRIES) {
               /* Restore original node links */
               node.m_links.store(node_links, std::memory_order_release);
+	      new_node.invalidate();
               return false;
             }
 
@@ -519,6 +528,7 @@ struct List {
       }
     }
 
+    new_node.invalidate();
     return false;
   }
 
