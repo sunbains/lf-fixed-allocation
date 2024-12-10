@@ -14,6 +14,10 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+option(BUILD_TESTING "Build tests" OFF)
+
+if(BUILD_TESTING)
+
 enable_testing()
 
 # Add Google Test directly
@@ -40,3 +44,4 @@ target_link_libraries(
 
 add_subdirectory(examples)
 add_subdirectory(tests)
+endif()
