@@ -239,12 +239,6 @@ struct List {
 
     while (retries++ < Node::MAX_RETRIES) [[likely]] {
       auto node_links = node.m_links.load(std::memory_order_acquire);
-
-      /* Check if node is already removed */
-      if (node_links == Node::NULL_LINK) [[unlikely]] {
-        return nullptr;
-      }
-
       auto [next, prev] = unpack_links(node_links);
 
       auto prev_node = to_node(prev);
@@ -346,7 +340,7 @@ struct List {
             if (head_retries++ >= Node::MAX_RETRIES) {
               /* Failed to update old head, try to restore state */
               m_head.store(old_head_link, std::memory_order_release);
-	      node.invalidate();
+              node.invalidate();
               return false;
             }
             
@@ -505,7 +499,7 @@ struct List {
             if (prev_retries++ >= Node::MAX_RETRIES) {
               /* Restore original node links */
               node.m_links.store(node_links, std::memory_order_release);
-	      new_node.invalidate();
+              new_node.invalidate();
               return false;
             }
 
@@ -561,6 +555,22 @@ struct List {
     }
 
     return nullptr;
+  }
+
+  [[nodiscard]] item_pointer pop_front() noexcept {
+    if (auto node = m_head.load(std::memory_order_acquire); node != Node::NULL_PTR) [[unlikely]] {
+      return remove(*to_item(node));
+    } else {
+      return nullptr;
+    }
+  }
+
+  [[nodiscard]] item_pointer pop_back() noexcept {
+    if (auto node = m_tail.load(std::memory_order_acquire); node != Node::NULL_PTR) [[unlikely]] {
+      return remove(*to_item(node));
+    } else {
+      return nullptr;
+    }
   }
 
   [[nodiscard]] iterator begin() noexcept {
