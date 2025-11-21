@@ -15,14 +15,15 @@ struct Iterator_invalidated : public std::runtime_error {
 };
 
 struct Node {
-  using Link_type = uint32_t;
+  using Link_type = uint16_t;
+  using Version_type = uint16_t;
   static constexpr auto NULL_PTR = std::numeric_limits<Link_type>::max();
   static constexpr auto NULL_LINK = std::numeric_limits<uint64_t>::max();
   static constexpr uint32_t MAX_RETRIES = 100;
 
   Node() = default;
   Node(Node&& rhs) noexcept : m_links(rhs.m_links.load(std::memory_order_relaxed)) {}
-  Node(Link_type next, Link_type prev) noexcept;
+  Node(Link_type next, Link_type prev, Version_type version) noexcept;
 
   Node& operator=(Node&& rhs) noexcept {
     m_links.store(rhs.m_links.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -37,16 +38,31 @@ struct Node {
     m_links.store(NULL_LINK, std::memory_order_relaxed);
   }
 
-  /** Atomic links storage, both next and prev links are stored in a single 64-bit integer */
+  /** Atomic links storage: version (16-bit) | next (16-bit) | prev_version (16-bit) | prev (16-bit) */
   std::atomic<uint64_t> m_links{NULL_LINK};
 };
 
-inline constexpr uint64_t pack_links(Node::Link_type next, Node::Link_type prev) noexcept {
-  return (static_cast<uint64_t>(next) << 32) | prev;
+inline constexpr uint64_t pack_links(Node::Link_type next, Node::Link_type prev, Node::Version_type next_version, Node::Version_type prev_version) noexcept {
+  return (static_cast<uint64_t>(next_version) << 48) |
+         (static_cast<uint64_t>(next) << 32) |
+         (static_cast<uint64_t>(prev_version) << 16) |
+         static_cast<uint64_t>(prev);
 }
 
-inline std::pair<Node::Link_type, Node::Link_type> unpack_links(uint64_t links) noexcept {
-  return {static_cast<Node::Link_type>(links >> 32), static_cast<Node::Link_type>(links & 0xFFFFFFFF)};
+struct Link_pack {
+  Node::Link_type next;
+  Node::Link_type prev;
+  Node::Version_type next_version;
+  Node::Version_type prev_version;
+};
+
+inline Link_pack unpack_links(uint64_t links) noexcept {
+  return {
+    static_cast<Node::Link_type>((links >> 32) & 0xFFFF),
+    static_cast<Node::Link_type>(links & 0xFFFF),
+    static_cast<Node::Version_type>((links >> 48) & 0xFFFF),
+    static_cast<Node::Version_type>((links >> 16) & 0xFFFF)
+  };
 }
 
 template<typename T, auto N, bool IsConst = false>
@@ -111,15 +127,15 @@ struct List_iterator {
 
     uint32_t retries{};
     auto current_links = unpack_links(m_current->m_links.load(std::memory_order_acquire));
-    node_pointer next{to_node(current_links.first)};
+    node_pointer next{to_node(current_links.next)};
 
     /* Validate current node hasn't been removed */
-    if (to_node(current_links.second) != m_prev) [[unlikely]] {
-      while (m_current != nullptr && to_node(current_links.second) != m_prev && retries++ < node_type::MAX_RETRIES) [[likely]] {
-        m_current = to_node(current_links.first);
+    if (to_node(current_links.prev) != m_prev) [[unlikely]] {
+      while (m_current != nullptr && to_node(current_links.prev) != m_prev && retries++ < node_type::MAX_RETRIES) [[likely]] {
+        m_current = to_node(current_links.next);
         if (m_current != nullptr) [[likely]] {
           current_links = unpack_links(m_current->m_links.load(std::memory_order_acquire));
-          m_prev = to_node(current_links.second);
+          m_prev = to_node(current_links.prev);
         }
       }
 
@@ -144,15 +160,15 @@ struct List_iterator {
 
     uint32_t retries = 0;
     auto prev_links = unpack_links(m_prev->m_links.load(std::memory_order_acquire));
-    auto prev = to_node(prev_links.second);
+    auto prev = to_node(prev_links.prev);
 
     /* Validate prev node hasn't been removed */
-    if (to_node(prev_links.first) != m_current) [[unlikely]] {
-      while (m_prev != nullptr && to_node(prev_links.first) != m_current && retries++ < node_type::MAX_RETRIES) [[likely]] {
-        m_prev = to_node(prev_links.second);
+    if (to_node(prev_links.next) != m_current) [[unlikely]] {
+      while (m_prev != nullptr && to_node(prev_links.next) != m_current && retries++ < node_type::MAX_RETRIES) [[likely]] {
+        m_prev = to_node(prev_links.prev);
         if (m_prev != nullptr) [[likely]] {
           prev_links = unpack_links(m_prev->m_links.load(std::memory_order_acquire));
-          m_current = to_node(prev_links.first);
+          m_current = to_node(prev_links.next);
         }
       }
 
@@ -239,19 +255,19 @@ struct List {
 
     while (retries++ < Node::MAX_RETRIES) [[likely]] {
       auto node_links = node.m_links.load(std::memory_order_acquire);
-      auto [next, prev] = unpack_links(node_links);
+      auto link_data = unpack_links(node_links);
 
-      auto prev_node = to_node(prev);
-      auto next_node = to_node(next);
+      auto prev_node = to_node(link_data.prev);
+      auto next_node = to_node(link_data.next);
       auto node_link = to_link(node);
 
       /* Handle head removal */
-      if (prev == Node::NULL_PTR && !m_head.compare_exchange_strong(node_link, next, std::memory_order_acq_rel)) [[unlikely]] {
+      if (link_data.prev == Node::NULL_PTR && !m_head.compare_exchange_strong(node_link, link_data.next, std::memory_order_acq_rel)) [[unlikely]] {
         continue;
       }
 
       /* Handle tail removal */
-      if (next == Node::NULL_PTR && !m_tail.compare_exchange_strong(node_link, prev, std::memory_order_acq_rel)) [[unlikely]] {
+      if (link_data.next == Node::NULL_PTR && !m_tail.compare_exchange_strong(node_link, link_data.prev, std::memory_order_acq_rel)) [[unlikely]] {
         continue;
       }
 
@@ -266,7 +282,7 @@ struct List {
       if (prev_node != nullptr) [[likely]] {
         uint32_t prev_retries{};
         uint64_t prev_links;
-        std::pair<Node::Link_type, Node::Link_type> prev_link_ptr;
+        Link_pack prev_link_data;
 
         do {
           if (prev_retries++ >= Node::MAX_RETRIES) [[unlikely]] {
@@ -274,20 +290,23 @@ struct List {
             break;
           }
 
-          prev_link_ptr = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
+          prev_link_data = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
 
-          if (prev_link_ptr.first != to_link(node)) [[unlikely]] {
+          if (prev_link_data.next != to_link(node)) [[unlikely]] {
             success = false;
             break;
           }
 
-        } while (!prev_node->m_links.compare_exchange_weak(prev_links, pack_links(next, prev_link_ptr.second), std::memory_order_acq_rel));
+        } while (!prev_node->m_links.compare_exchange_weak(prev_links,
+                  pack_links(link_data.next, prev_link_data.prev,
+                            prev_link_data.next_version + 1, prev_link_data.prev_version),
+                  std::memory_order_acq_rel));
       }
 
       if (next_node != nullptr && success) [[likely]] {
         uint32_t next_retries{};
         uint64_t next_links;
-        std::pair<Node::Link_type, Node::Link_type> next_link_ptr;
+        Link_pack next_link_data;
 
         do {
           if (next_retries++ >= Node::MAX_RETRIES) [[unlikely]] {
@@ -295,14 +314,17 @@ struct List {
             break;
           }
 
-          next_link_ptr = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
+          next_link_data = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
 
-          if (next_link_ptr.second != to_link(node)) [[unlikely]] {
+          if (next_link_data.prev != to_link(node)) [[unlikely]] {
             success = false;
             break;
           }
 
-        } while (!next_node->m_links.compare_exchange_weak(next_links, pack_links(next_link_ptr.first, prev), std::memory_order_acq_rel));
+        } while (!next_node->m_links.compare_exchange_weak(next_links,
+                  pack_links(next_link_data.next, link_data.prev,
+                            next_link_data.next_version, next_link_data.prev_version + 1),
+                  std::memory_order_acq_rel));
       }
 
       if (success) {
@@ -326,16 +348,16 @@ struct List {
       typename node_type::Link_type old_head_link = m_head.load(std::memory_order_acquire);
       auto new_node_link = to_link(node);
 
-      node.m_links.store(pack_links(old_head_link, Node::NULL_PTR), std::memory_order_relaxed);
-      
+      node.m_links.store(pack_links(old_head_link, Node::NULL_PTR, 0, 0), std::memory_order_relaxed);
+
       if (m_head.compare_exchange_strong(old_head_link, new_node_link, std::memory_order_acq_rel)) [[likely]] {
-        
+
         if (old_head_link != Node::NULL_PTR) [[likely]] {
           uint32_t head_retries{};
           uint64_t old_head_links;
           auto old_head = to_node(old_head_link);
-          std::pair<Node::Link_type, Node::Link_type> old_head_ptrs;
-          
+          Link_pack old_head_data;
+
           do {
             if (head_retries++ >= Node::MAX_RETRIES) {
               /* Failed to update old head, try to restore state */
@@ -343,15 +365,17 @@ struct List {
               node.invalidate();
               return false;
             }
-            
-            old_head_ptrs = unpack_links(old_head_links = old_head->m_links.load(std::memory_order_acquire));
-            
-          } while (!old_head->m_links.compare_exchange_weak(old_head_links, pack_links(old_head_ptrs.first, new_node_link), std::memory_order_acq_rel));
+
+            old_head_data = unpack_links(old_head_links = old_head->m_links.load(std::memory_order_acquire));
+
+          } while (!old_head->m_links.compare_exchange_weak(old_head_links,
+                    pack_links(old_head_data.next, new_node_link,
+                              old_head_data.next_version, old_head_data.prev_version + 1),
+                    std::memory_order_acq_rel));
         }
 
-        if (m_tail.load(std::memory_order_acquire) == Node::NULL_PTR) {
-          m_tail.store(new_node_link, std::memory_order_release);
-        }
+        typename node_type::Link_type expected_tail = Node::NULL_PTR;
+        m_tail.compare_exchange_strong(expected_tail, new_node_link, std::memory_order_acq_rel);
 
         return true;
       }
@@ -369,31 +393,33 @@ struct List {
       typename node_type::Link_type old_tail_link = m_tail.load(std::memory_order_acquire);
       auto new_node_link = to_link(node);
 
-      node.m_links.store(pack_links(Node::NULL_PTR, old_tail_link), std::memory_order_relaxed);
-      
+      node.m_links.store(pack_links(Node::NULL_PTR, old_tail_link, 0, 0), std::memory_order_relaxed);
+
       if (m_tail.compare_exchange_strong(old_tail_link, new_node_link, std::memory_order_acq_rel)) [[likely]] {
-        
+
         if (old_tail_link != Node::NULL_PTR) [[likely]] {
           uint64_t old_tail_links;
           uint32_t tail_retries{};
           auto old_tail = to_node(old_tail_link);
-          std::pair<Node::Link_type, Node::Link_type> old_tail_pointers;
-          
+          Link_pack old_tail_data;
+
           do {
             if (tail_retries++ >= Node::MAX_RETRIES) {
               m_tail.store(old_tail_link, std::memory_order_release);
-	      node.invalidate();
+              node.invalidate();
               return false;
             }
-            
-            old_tail_pointers = unpack_links(old_tail_links = old_tail->m_links.load(std::memory_order_acquire));
-            
-          } while (!old_tail->m_links.compare_exchange_weak(old_tail_links, pack_links(new_node_link, old_tail_pointers.second), std::memory_order_acq_rel));
+
+            old_tail_data = unpack_links(old_tail_links = old_tail->m_links.load(std::memory_order_acquire));
+
+          } while (!old_tail->m_links.compare_exchange_weak(old_tail_links,
+                    pack_links(new_node_link, old_tail_data.prev,
+                              old_tail_data.next_version + 1, old_tail_data.prev_version),
+                    std::memory_order_acq_rel));
         }
 
-        if (m_head.load(std::memory_order_acquire) == Node::NULL_PTR) [[unlikely]] {
-          m_head.store(new_node_link, std::memory_order_release);
-        }
+        typename node_type::Link_type expected_head = Node::NULL_PTR;
+        m_head.compare_exchange_strong(expected_head, new_node_link, std::memory_order_acq_rel);
 
         return true;
       }
@@ -415,7 +441,7 @@ struct List {
 
     while (retries++ < Node::MAX_RETRIES) [[likely]] {
       uint64_t node_links = node.m_links.load(std::memory_order_acquire);
-      auto [next, prev] = unpack_links(node_links);
+      auto link_data = unpack_links(node_links);
       auto new_node_link = to_link(new_node);
 
       if (node_links == Node::NULL_LINK) [[unlikely]] {
@@ -425,34 +451,40 @@ struct List {
       }
 
       /* Set new node's links */
-      new_node.m_links.store(pack_links(next, to_link(node)), std::memory_order_relaxed);
+      new_node.m_links.store(pack_links(link_data.next, to_link(node), 0, 0), std::memory_order_relaxed);
 
-      if (node.m_links.compare_exchange_strong(node_links, pack_links(new_node_link, prev), std::memory_order_acq_rel)) [[likely]] {
+      if (node.m_links.compare_exchange_strong(node_links,
+            pack_links(new_node_link, link_data.prev,
+                      link_data.next_version + 1, link_data.prev_version),
+            std::memory_order_acq_rel)) [[likely]] {
 
         /* Update next node's prev link if it exists */
-        if (next != Node::NULL_PTR) {
+        if (link_data.next != Node::NULL_PTR) {
           uint64_t next_links;
           uint32_t next_retries{};
-          auto next_node = to_node(next);
-          std::pair<Node::Link_type, Node::Link_type> next_link_pointers;
+          auto next_node = to_node(link_data.next);
+          Link_pack next_link_data;
 
           do {
             if (next_retries++ >= Node::MAX_RETRIES) {
               /* Restore original node links */
               node.m_links.store(node_links, std::memory_order_release);
-	      new_node.invalidate();
+              new_node.invalidate();
               return false;
             }
 
-            next_link_pointers = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
+            next_link_data = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
 
-            if (next_link_pointers.second != to_link(node)) [[unlikely]] {
+            if (next_link_data.prev != to_link(node)) [[unlikely]] {
               /* Next node was modified, restore and retry */
               node.m_links.store(node_links, std::memory_order_release);
               break;
             }
 
-          } while (!next_node->m_links.compare_exchange_weak(next_links, pack_links(next_link_pointers.first, new_node_link), std::memory_order_acq_rel));
+          } while (!next_node->m_links.compare_exchange_weak(next_links,
+                    pack_links(next_link_data.next, new_node_link,
+                              next_link_data.next_version, next_link_data.prev_version + 1),
+                    std::memory_order_acq_rel));
         } else {
           /* Update tail if necessary */
           auto expected_tail = to_link(node);
@@ -474,7 +506,7 @@ struct List {
 
     while (retries++ < Node::MAX_RETRIES) [[likely]] {
       uint64_t node_links = node.m_links.load(std::memory_order_acquire);
-      auto [next, prev] = unpack_links(node_links);
+      auto link_data = unpack_links(node_links);
       auto new_node_link = to_link(new_node);
 
       if (node_links == Node::NULL_LINK) [[unlikely]] {
@@ -484,16 +516,19 @@ struct List {
       }
 
       /* Set new node's links */
-      new_node.m_links.store(pack_links(to_link(node), prev), std::memory_order_relaxed);
+      new_node.m_links.store(pack_links(to_link(node), link_data.prev, 0, 0), std::memory_order_relaxed);
 
-      if (node.m_links.compare_exchange_strong(node_links, pack_links(next, new_node_link), std::memory_order_acq_rel)) [[likely]] {
+      if (node.m_links.compare_exchange_strong(node_links,
+            pack_links(link_data.next, new_node_link,
+                      link_data.next_version, link_data.prev_version + 1),
+            std::memory_order_acq_rel)) [[likely]] {
 
         /* Update prev node's next link if it exists */
-        if (prev != Node::NULL_PTR) [[likely]] {
+        if (link_data.prev != Node::NULL_PTR) [[likely]] {
           uint64_t prev_links;
           uint32_t prev_retries{};
-          auto prev_node = to_node(prev);
-          std::pair<Node::Link_type, Node::Link_type> prev_link_pointers;
+          auto prev_node = to_node(link_data.prev);
+          Link_pack prev_link_data;
 
           do {
             if (prev_retries++ >= Node::MAX_RETRIES) {
@@ -503,15 +538,18 @@ struct List {
               return false;
             }
 
-            prev_link_pointers = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
+            prev_link_data = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
 
-            if (prev_link_pointers.first != to_link(node)) [[unlikely]] {
+            if (prev_link_data.next != to_link(node)) [[unlikely]] {
               /* Prev node was modified, restore and retry */
               node.m_links.store(node_links, std::memory_order_release);
               break;
             }
 
-          } while (!prev_node->m_links.compare_exchange_weak(prev_links, pack_links(new_node_link, prev_link_pointers.second), std::memory_order_acq_rel));
+          } while (!prev_node->m_links.compare_exchange_weak(prev_links,
+                    pack_links(new_node_link, prev_link_data.prev,
+                              prev_link_data.next_version + 1, prev_link_data.prev_version),
+                    std::memory_order_acq_rel));
         } else {
           /* Update head if necessary */
           auto expected_head = to_link(node);
@@ -551,7 +589,7 @@ struct List {
         continue;
       }
 
-      current = unpack_links(links).first;
+      current = unpack_links(links).next;
     }
 
     return nullptr;
@@ -630,11 +668,11 @@ struct List {
       return true;  // Removed nodes are valid
     }
 
-    auto [next, prev] = unpack_links(links);
-    
+    auto link_data = unpack_links(links);
+
     /* Check next pointer consistency */
-    if (next != Node::NULL_PTR) [[likely]] {
-      auto next_node = to_node(next);
+    if (link_data.next != Node::NULL_PTR) [[likely]] {
+      auto next_node = to_node(link_data.next);
 
       if (!next_node || next_node->is_null()) {
         return false;
@@ -646,16 +684,16 @@ struct List {
         return false;
       }
 
-      auto [_, next_prev] = unpack_links(next_links);
+      auto next_link_data = unpack_links(next_links);
 
-      if (next_prev != to_link(node)) [[unlikely]] {
+      if (next_link_data.prev != to_link(node)) [[unlikely]] {
         return false;
       }
     }
 
     /* Check prev pointer consistency */
-    if (prev != Node::NULL_PTR) [[likely]] {
-      auto prev_node = to_node(prev);
+    if (link_data.prev != Node::NULL_PTR) [[likely]] {
+      auto prev_node = to_node(link_data.prev);
 
       if (!prev_node || prev_node->is_null()) [[unlikely]] {
         return false;
@@ -667,9 +705,9 @@ struct List {
         return false;
       }
 
-      auto [prev_next, _] = unpack_links(prev_links);
+      auto prev_link_data = unpack_links(prev_links);
 
-      if (prev_next != to_link(node)) [[unlikely]] {
+      if (prev_link_data.next != to_link(node)) [[unlikely]] {
         return false;
       }
     }
