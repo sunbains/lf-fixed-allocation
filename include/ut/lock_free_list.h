@@ -15,9 +15,17 @@ struct Iterator_invalidated : public std::runtime_error {
 };
 
 struct Node {
-  using Link_type = uint16_t;
-  using Version_type = uint16_t;
-  static constexpr auto NULL_PTR = std::numeric_limits<Link_type>::max();
+  using Link_type = uint32_t;
+  using Version_type = uint8_t;
+
+  // Configuration: Total bits for version counters (2 bits per version)
+  static constexpr uint32_t VERSION_BITS_PER_LINK = 2;
+  static constexpr uint32_t TOTAL_VERSION_BITS = VERSION_BITS_PER_LINK * 2;  // next_version + prev_version
+
+  // Derived constants
+  static constexpr uint32_t LINK_BITS = (64 - TOTAL_VERSION_BITS) / 2;  // 30 bits per link
+  static constexpr auto VERSION_MASK = (1u << VERSION_BITS_PER_LINK) - 1;  // 0x3 for 2 bits
+  static constexpr auto NULL_PTR = (1u << LINK_BITS) - 1;  // Max value for link bits
   static constexpr auto NULL_LINK = std::numeric_limits<uint64_t>::max();
   static constexpr uint32_t MAX_RETRIES = 100;
 
@@ -38,15 +46,26 @@ struct Node {
     m_links.store(NULL_LINK, std::memory_order_relaxed);
   }
 
-  /** Atomic links storage: version (16-bit) | next (16-bit) | prev_version (16-bit) | prev (16-bit) */
+  /** Atomic links storage layout (64 bits total):
+   *  - next link (LINK_BITS)
+   *  - next_version (VERSION_BITS_PER_LINK)
+   *  - prev link (LINK_BITS)
+   *  - prev_version (VERSION_BITS_PER_LINK)
+   */
   std::atomic<uint64_t> m_links{NULL_LINK};
 };
 
 inline constexpr uint64_t pack_links(Node::Link_type next, Node::Link_type prev, Node::Version_type next_version, Node::Version_type prev_version) noexcept {
-  return (static_cast<uint64_t>(next_version) << 48) |
-         (static_cast<uint64_t>(next) << 32) |
-         (static_cast<uint64_t>(prev_version) << 16) |
-         static_cast<uint64_t>(prev);
+  constexpr uint32_t LINK_MASK = (1u << Node::LINK_BITS) - 1;
+  constexpr uint32_t PREV_VERSION_BITS = Node::VERSION_BITS_PER_LINK;
+  constexpr uint32_t PREV_LINK_SHIFT = PREV_VERSION_BITS;
+  constexpr uint32_t NEXT_VERSION_SHIFT = PREV_VERSION_BITS + Node::LINK_BITS;
+  constexpr uint32_t NEXT_LINK_SHIFT = PREV_VERSION_BITS + Node::LINK_BITS + Node::VERSION_BITS_PER_LINK;
+
+  return (static_cast<uint64_t>(next & LINK_MASK) << NEXT_LINK_SHIFT) |
+         (static_cast<uint64_t>(next_version & Node::VERSION_MASK) << NEXT_VERSION_SHIFT) |
+         (static_cast<uint64_t>(prev & LINK_MASK) << PREV_LINK_SHIFT) |
+         static_cast<uint64_t>(prev_version & Node::VERSION_MASK);
 }
 
 struct Link_pack {
@@ -57,11 +76,17 @@ struct Link_pack {
 };
 
 inline Link_pack unpack_links(uint64_t links) noexcept {
+  constexpr uint32_t LINK_MASK = (1u << Node::LINK_BITS) - 1;
+  constexpr uint32_t PREV_VERSION_BITS = Node::VERSION_BITS_PER_LINK;
+  constexpr uint32_t PREV_LINK_SHIFT = PREV_VERSION_BITS;
+  constexpr uint32_t NEXT_VERSION_SHIFT = PREV_VERSION_BITS + Node::LINK_BITS;
+  constexpr uint32_t NEXT_LINK_SHIFT = PREV_VERSION_BITS + Node::LINK_BITS + Node::VERSION_BITS_PER_LINK;
+
   return {
-    static_cast<Node::Link_type>((links >> 32) & 0xFFFF),
-    static_cast<Node::Link_type>(links & 0xFFFF),
-    static_cast<Node::Version_type>((links >> 48) & 0xFFFF),
-    static_cast<Node::Version_type>((links >> 16) & 0xFFFF)
+    static_cast<Node::Link_type>((links >> NEXT_LINK_SHIFT) & LINK_MASK),
+    static_cast<Node::Link_type>((links >> PREV_LINK_SHIFT) & LINK_MASK),
+    static_cast<Node::Version_type>((links >> NEXT_VERSION_SHIFT) & Node::VERSION_MASK),
+    static_cast<Node::Version_type>(links & Node::VERSION_MASK)
   };
 }
 
@@ -299,7 +324,7 @@ struct List {
 
         } while (!prev_node->m_links.compare_exchange_weak(prev_links,
                   pack_links(link_data.next, prev_link_data.prev,
-                            prev_link_data.next_version + 1, prev_link_data.prev_version),
+                            (prev_link_data.next_version + 1) & Node::VERSION_MASK, prev_link_data.prev_version),
                   std::memory_order_acq_rel));
       }
 
@@ -323,7 +348,7 @@ struct List {
 
         } while (!next_node->m_links.compare_exchange_weak(next_links,
                   pack_links(next_link_data.next, link_data.prev,
-                            next_link_data.next_version, next_link_data.prev_version + 1),
+                            next_link_data.next_version, (next_link_data.prev_version + 1) & Node::VERSION_MASK),
                   std::memory_order_acq_rel));
       }
 
@@ -370,7 +395,7 @@ struct List {
 
           } while (!old_head->m_links.compare_exchange_weak(old_head_links,
                     pack_links(old_head_data.next, new_node_link,
-                              old_head_data.next_version, old_head_data.prev_version + 1),
+                              old_head_data.next_version, (old_head_data.prev_version + 1) & Node::VERSION_MASK),
                     std::memory_order_acq_rel));
         }
 
@@ -414,7 +439,7 @@ struct List {
 
           } while (!old_tail->m_links.compare_exchange_weak(old_tail_links,
                     pack_links(new_node_link, old_tail_data.prev,
-                              old_tail_data.next_version + 1, old_tail_data.prev_version),
+                              (old_tail_data.next_version + 1) & Node::VERSION_MASK, old_tail_data.prev_version),
                     std::memory_order_acq_rel));
         }
 
@@ -455,7 +480,7 @@ struct List {
 
       if (node.m_links.compare_exchange_strong(node_links,
             pack_links(new_node_link, link_data.prev,
-                      link_data.next_version + 1, link_data.prev_version),
+                      (link_data.next_version + 1) & Node::VERSION_MASK, link_data.prev_version),
             std::memory_order_acq_rel)) [[likely]] {
 
         /* Update next node's prev link if it exists */
@@ -483,7 +508,7 @@ struct List {
 
           } while (!next_node->m_links.compare_exchange_weak(next_links,
                     pack_links(next_link_data.next, new_node_link,
-                              next_link_data.next_version, next_link_data.prev_version + 1),
+                              next_link_data.next_version, (next_link_data.prev_version + 1) & Node::VERSION_MASK),
                     std::memory_order_acq_rel));
         } else {
           /* Update tail if necessary */
@@ -520,7 +545,7 @@ struct List {
 
       if (node.m_links.compare_exchange_strong(node_links,
             pack_links(link_data.next, new_node_link,
-                      link_data.next_version, link_data.prev_version + 1),
+                      link_data.next_version, (link_data.prev_version + 1) & Node::VERSION_MASK),
             std::memory_order_acq_rel)) [[likely]] {
 
         /* Update prev node's next link if it exists */
@@ -548,7 +573,7 @@ struct List {
 
           } while (!prev_node->m_links.compare_exchange_weak(prev_links,
                     pack_links(new_node_link, prev_link_data.prev,
-                              prev_link_data.next_version + 1, prev_link_data.prev_version),
+                              (prev_link_data.next_version + 1) & Node::VERSION_MASK, prev_link_data.prev_version),
                     std::memory_order_acq_rel));
         } else {
           /* Update head if necessary */
@@ -596,19 +621,31 @@ struct List {
   }
 
   [[nodiscard]] item_pointer pop_front() noexcept {
-    if (auto node = m_head.load(std::memory_order_acquire); node != Node::NULL_PTR) [[unlikely]] {
-      return remove(*to_item(node));
-    } else {
-      return nullptr;
+    uint32_t retries{};
+    while (retries++ < Node::MAX_RETRIES) [[likely]] {
+      auto link = m_head.load(std::memory_order_acquire);
+      if (link == Node::NULL_PTR) [[unlikely]] {
+        return nullptr;
+      }
+      if (auto* item = remove(*to_item(link))) [[likely]] {
+        return item;
+      }
     }
+    return nullptr;
   }
 
   [[nodiscard]] item_pointer pop_back() noexcept {
-    if (auto node = m_tail.load(std::memory_order_acquire); node != Node::NULL_PTR) [[unlikely]] {
-      return remove(*to_item(node));
-    } else {
-      return nullptr;
+    uint32_t retries{};
+    while (retries++ < Node::MAX_RETRIES) [[likely]] {
+      auto link = m_tail.load(std::memory_order_acquire);
+      if (link == Node::NULL_PTR) [[unlikely]] {
+        return nullptr;
+      }
+      if (auto* item = remove(*to_item(link))) [[likely]] {
+        return item;
+      }
     }
+    return nullptr;
   }
 
   [[nodiscard]] iterator begin() noexcept {
