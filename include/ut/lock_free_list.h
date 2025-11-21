@@ -317,6 +317,11 @@ struct List {
 
           prev_link_data = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
 
+          if (prev_links == Node::NULL_LINK) [[unlikely]] {
+            success = false;
+            break;
+          }
+
           if (prev_link_data.next != to_link(node)) [[unlikely]] {
             success = false;
             break;
@@ -341,6 +346,11 @@ struct List {
 
           next_link_data = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
 
+          if (next_links == Node::NULL_LINK) [[unlikely]] {
+            success = false;
+            break;
+          }
+
           if (next_link_data.prev != to_link(node)) [[unlikely]] {
             success = false;
             break;
@@ -354,6 +364,7 @@ struct List {
 
       if (success) {
         node.invalidate();
+        m_size.fetch_sub(1, std::memory_order_relaxed);
         return to_item(node);
       }
 
@@ -393,6 +404,13 @@ struct List {
 
             old_head_data = unpack_links(old_head_links = old_head->m_links.load(std::memory_order_acquire));
 
+            if (old_head_links == Node::NULL_LINK) [[unlikely]] {
+              /* Old head was removed, try to restore state */
+              m_head.store(old_head_link, std::memory_order_release);
+              node.invalidate();
+              return false;
+            }
+
           } while (!old_head->m_links.compare_exchange_weak(old_head_links,
                     pack_links(old_head_data.next, new_node_link,
                               old_head_data.next_version, (old_head_data.prev_version + 1) & Node::VERSION_MASK),
@@ -402,6 +420,7 @@ struct List {
         typename node_type::Link_type expected_tail = Node::NULL_PTR;
         m_tail.compare_exchange_strong(expected_tail, new_node_link, std::memory_order_acq_rel);
 
+        m_size.fetch_add(1, std::memory_order_relaxed);
         return true;
       }
     }
@@ -437,6 +456,13 @@ struct List {
 
             old_tail_data = unpack_links(old_tail_links = old_tail->m_links.load(std::memory_order_acquire));
 
+            if (old_tail_links == Node::NULL_LINK) [[unlikely]] {
+              /* Old tail was removed, try to restore state */
+              m_tail.store(old_tail_link, std::memory_order_release);
+              node.invalidate();
+              return false;
+            }
+
           } while (!old_tail->m_links.compare_exchange_weak(old_tail_links,
                     pack_links(new_node_link, old_tail_data.prev,
                               (old_tail_data.next_version + 1) & Node::VERSION_MASK, old_tail_data.prev_version),
@@ -446,6 +472,7 @@ struct List {
         typename node_type::Link_type expected_head = Node::NULL_PTR;
         m_head.compare_exchange_strong(expected_head, new_node_link, std::memory_order_acq_rel);
 
+        m_size.fetch_add(1, std::memory_order_relaxed);
         return true;
       }
     }
@@ -500,6 +527,12 @@ struct List {
 
             next_link_data = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
 
+            if (next_links == Node::NULL_LINK) [[unlikely]] {
+              /* Next node was removed, restore and retry */
+              node.m_links.store(node_links, std::memory_order_release);
+              break;
+            }
+
             if (next_link_data.prev != to_link(node)) [[unlikely]] {
               /* Next node was modified, restore and retry */
               node.m_links.store(node_links, std::memory_order_release);
@@ -516,6 +549,7 @@ struct List {
           m_tail.compare_exchange_strong(expected_tail, new_node_link, std::memory_order_acq_rel);
         }
 
+        m_size.fetch_add(1, std::memory_order_relaxed);
         return true;
       }
     }
@@ -565,6 +599,12 @@ struct List {
 
             prev_link_data = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
 
+            if (prev_links == Node::NULL_LINK) [[unlikely]] {
+              /* Prev node was removed, restore and retry */
+              node.m_links.store(node_links, std::memory_order_release);
+              break;
+            }
+
             if (prev_link_data.next != to_link(node)) [[unlikely]] {
               /* Prev node was modified, restore and retry */
               node.m_links.store(node_links, std::memory_order_release);
@@ -581,6 +621,7 @@ struct List {
           m_head.compare_exchange_strong(expected_head, new_node_link, std::memory_order_acq_rel);
         }
 
+        m_size.fetch_add(1, std::memory_order_relaxed);
         return true;
       }
     }
@@ -753,10 +794,15 @@ struct List {
   }
 #endif // UT_DEBUG
 
+  [[nodiscard]] size_t size() const noexcept {
+    return m_size.load(std::memory_order_relaxed);
+  }
+
 private:
   std::pair<item_pointer, item_pointer> m_bounds{};
   std::atomic<typename node_type::Link_type> m_head{node_type::NULL_PTR};
   std::atomic<typename node_type::Link_type> m_tail{node_type::NULL_PTR};
+  std::atomic<size_t> m_size{0};
 };
 
 } // namespace ut

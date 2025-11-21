@@ -223,3 +223,47 @@ TEST_F(List_test, concurrent_push_back) {
   EXPECT_TRUE(std::all_of(found.begin(), found.end(), [](bool v) { return v; }));
 }
 
+TEST_F(List_test, size_tracking) {
+  // Test initial size
+  EXPECT_EQ(m_list->size(), 0);
+
+  // Test push_front increments size
+  m_buffer[0] = Test_item(1);
+  m_list->push_front(m_buffer[0]);
+  EXPECT_EQ(m_list->size(), 1);
+
+  // Test push_back increments size
+  m_buffer[1] = Test_item(2);
+  m_list->push_back(m_buffer[1]);
+  EXPECT_EQ(m_list->size(), 2);
+
+  // Test insert_after increments size
+  m_buffer[2] = Test_item(3);
+  m_list->insert_after(m_buffer[0], m_buffer[2]);
+  EXPECT_EQ(m_list->size(), 3);
+
+  // Test insert_before increments size
+  m_buffer[3] = Test_item(4);
+  m_list->insert_before(m_buffer[1], m_buffer[3]);
+  EXPECT_EQ(m_list->size(), 4);
+
+  // Test remove decrements size
+  m_list->remove(m_buffer[2]);
+  EXPECT_EQ(m_list->size(), 3);
+
+  // Test pop_front decrements size
+  auto* popped1 = m_list->pop_front();
+  EXPECT_NE(popped1, nullptr);
+  EXPECT_EQ(m_list->size(), 2);
+
+  // Test pop_back decrements size
+  auto* popped2 = m_list->pop_back();
+  EXPECT_NE(popped2, nullptr);
+  EXPECT_EQ(m_list->size(), 1);
+
+  // Remove last element
+  auto* popped3 = m_list->pop_front();
+  EXPECT_NE(popped3, nullptr);
+  EXPECT_EQ(m_list->size(), 0);
+}
+
