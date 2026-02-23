@@ -26,6 +26,7 @@ struct Node {
   static constexpr uint32_t LINK_BITS = (64 - TOTAL_VERSION_BITS) / 2;  // 30 bits per link
   static constexpr auto VERSION_MASK = (1u << VERSION_BITS_PER_LINK) - 1;  // 0x3 for 2 bits
   static constexpr auto NULL_PTR = (1u << LINK_BITS) - 1;  // Max value for link bits
+  static constexpr auto DELETING_MARK = NULL_PTR - 1;  // Marks node as being deleted
   static constexpr auto NULL_LINK = std::numeric_limits<uint64_t>::max();
   static constexpr uint32_t MAX_RETRIES = 100;
 
@@ -40,6 +41,20 @@ struct Node {
 
   bool is_null() const noexcept {
     return m_links.load(std::memory_order_relaxed) == NULL_LINK;
+  }
+
+  bool is_deleting() const noexcept {
+    auto links = m_links.load(std::memory_order_acquire);
+    if (links == NULL_LINK) return false;
+    auto next = static_cast<Link_type>((links >> (VERSION_BITS_PER_LINK + LINK_BITS + VERSION_BITS_PER_LINK)) & ((1u << LINK_BITS) - 1));
+    return next == DELETING_MARK;
+  }
+
+  bool is_removed_or_deleting() const noexcept {
+    auto links = m_links.load(std::memory_order_acquire);
+    if (links == NULL_LINK) return true;
+    auto next = static_cast<Link_type>((links >> (VERSION_BITS_PER_LINK + LINK_BITS + VERSION_BITS_PER_LINK)) & ((1u << LINK_BITS) - 1));
+    return next == DELETING_MARK;
   }
 
   void invalidate() noexcept {
@@ -73,6 +88,10 @@ struct Link_pack {
   Node::Link_type prev;
   Node::Version_type next_version;
   Node::Version_type prev_version;
+
+  bool is_deleting() const noexcept {
+    return next == Node::DELETING_MARK;
+  }
 };
 
 inline Link_pack unpack_links(uint64_t links) noexcept {
@@ -123,7 +142,7 @@ struct List_iterator {
   }
 
   [[nodiscard]] inline node_pointer to_node(typename node_type::Link_type link) const noexcept {
-    if (link == node_type::NULL_PTR) return nullptr;
+    if (link == node_type::NULL_PTR || link == node_type::DELETING_MARK) return nullptr;
     auto base = const_cast<T*>(m_base);
     auto& node = (base[link].*N)();
     return const_cast<node_pointer>(&node);
@@ -151,7 +170,17 @@ struct List_iterator {
     }
 
     uint32_t retries{};
-    auto current_links = unpack_links(m_current->m_links.load(std::memory_order_acquire));
+    uint64_t raw_links = m_current->m_links.load(std::memory_order_acquire);
+
+    /* Handle deleted or deleting nodes */
+    if (raw_links == node_type::NULL_LINK) [[unlikely]] {
+      /* Current node was fully removed - move to end */
+      m_prev = m_current;
+      m_current = nullptr;
+      return *this;
+    }
+
+    auto current_links = unpack_links(raw_links);
     node_pointer next{to_node(current_links.next)};
 
     /* Validate current node hasn't been removed */
@@ -159,7 +188,13 @@ struct List_iterator {
       while (m_current != nullptr && to_node(current_links.prev) != m_prev && retries++ < node_type::MAX_RETRIES) [[likely]] {
         m_current = to_node(current_links.next);
         if (m_current != nullptr) [[likely]] {
-          current_links = unpack_links(m_current->m_links.load(std::memory_order_acquire));
+          raw_links = m_current->m_links.load(std::memory_order_acquire);
+          if (raw_links == node_type::NULL_LINK) [[unlikely]] {
+            m_prev = m_current;
+            m_current = nullptr;
+            return *this;
+          }
+          current_links = unpack_links(raw_links);
           m_prev = to_node(current_links.prev);
         }
       }
@@ -184,22 +219,38 @@ struct List_iterator {
     if (!m_prev) return *this;
 
     uint32_t retries = 0;
-    auto prev_links = unpack_links(m_prev->m_links.load(std::memory_order_acquire));
+    uint64_t raw_links = m_prev->m_links.load(std::memory_order_acquire);
+
+    /* Handle deleted nodes */
+    if (raw_links == node_type::NULL_LINK) [[unlikely]] {
+      m_prev = nullptr;
+      return *this;
+    }
+
+    auto prev_links = unpack_links(raw_links);
+
+    /* Handle node being deleted - move past it */
+    while (prev_links.is_deleting() && m_prev != nullptr && retries++ < node_type::MAX_RETRIES) [[unlikely]] {
+      m_prev = to_node(prev_links.prev);
+      if (!m_prev) return *this;
+      raw_links = m_prev->m_links.load(std::memory_order_acquire);
+      if (raw_links == node_type::NULL_LINK) {
+        m_prev = nullptr;
+        return *this;
+      }
+      prev_links = unpack_links(raw_links);
+    }
+
+    if (retries >= node_type::MAX_RETRIES) {
+      throw Iterator_invalidated("Iterator invalidated by concurrent modifications");
+    }
+
     auto prev = to_node(prev_links.prev);
 
-    /* Validate prev node hasn't been removed */
-    if (to_node(prev_links.next) != m_current) [[unlikely]] {
-      while (m_prev != nullptr && to_node(prev_links.next) != m_current && retries++ < node_type::MAX_RETRIES) [[likely]] {
-        m_prev = to_node(prev_links.prev);
-        if (m_prev != nullptr) [[likely]] {
-          prev_links = unpack_links(m_prev->m_links.load(std::memory_order_acquire));
-          m_current = to_node(prev_links.next);
-        }
-      }
-
-      if (retries >= node_type::MAX_RETRIES) {
-        throw Iterator_invalidated("Iterator invalidated by concurrent modifications");
-      }
+    /* Cycle detection: if prev equals current m_prev, we'd loop forever */
+    if (prev == m_prev) [[unlikely]] {
+      m_prev = nullptr;
+      return *this;
     }
 
     m_current = m_prev;
@@ -245,7 +296,7 @@ struct List {
 
   /* Utility methods */
   [[nodiscard]] static node_pointer to_node(const item_pointer base, typename node_type::Link_type link) noexcept {
-    if (link == node_type::NULL_PTR) [[unlikely]] {
+    if (link == node_type::NULL_PTR || link == node_type::DELETING_MARK) [[unlikely]] {
       return nullptr;
     } else [[likely]] {
       auto& node = (base[link].*N)();
@@ -254,7 +305,7 @@ struct List {
   }
 
   [[nodiscard]] node_pointer to_node(typename node_type::Link_type link) const noexcept {
-    if (link == node_type::NULL_PTR) [[unlikely]] {
+    if (link == node_type::NULL_PTR || link == node_type::DELETING_MARK) [[unlikely]] {
       return nullptr;
     } else [[likely]] {
       return to_node(const_cast<item_pointer>(m_bounds.first), link);
@@ -280,30 +331,58 @@ struct List {
 
     while (retries++ < Node::MAX_RETRIES) [[likely]] {
       auto node_links = node.m_links.load(std::memory_order_acquire);
+
+      /* Check if already removed or being deleted */
+      if (node_links == Node::NULL_LINK) [[unlikely]] {
+        return nullptr;  /* Already removed */
+      }
+
       auto link_data = unpack_links(node_links);
 
-      auto prev_node = to_node(link_data.prev);
-      auto next_node = to_node(link_data.next);
+      /* Check if already being deleted by another thread */
+      if (link_data.is_deleting()) [[unlikely]] {
+        return nullptr;  /* Another thread is deleting this */
+      }
+
+      /* Save original values before any modifications */
+      auto original_prev = link_data.prev;
+      auto original_next = link_data.next;
+      auto prev_node = to_node(original_prev);
+      auto next_node = to_node(original_next);
       auto node_link = to_link(node);
 
-      /* Handle head removal */
-      if (link_data.prev == Node::NULL_PTR && !m_head.compare_exchange_strong(node_link, link_data.next, std::memory_order_acq_rel)) [[unlikely]] {
-        continue;
+      /* Step 1: Mark node as "deleting" - this is the commit point */
+      /* We encode the original_next in the prev field since we need it later */
+      /* Use DELETING_MARK as next to indicate deletion, keep prev as-is */
+      uint64_t deleting_links = pack_links(Node::DELETING_MARK, original_prev,
+                                           (link_data.next_version + 1) & Node::VERSION_MASK,
+                                           link_data.prev_version);
+
+      if (!node.m_links.compare_exchange_strong(node_links, deleting_links, std::memory_order_acq_rel)) [[unlikely]] {
+        continue;  /* Node was modified, retry */
       }
 
-      /* Handle tail removal */
-      if (link_data.next == Node::NULL_PTR && !m_tail.compare_exchange_strong(node_link, link_data.prev, std::memory_order_acq_rel)) [[unlikely]] {
-        continue;
+      /* Node is now marked as deleting - we own this deletion */
+      /* Decrement size immediately since deletion is committed */
+      m_size.fetch_sub(1, std::memory_order_relaxed);
+
+      /* Step 2: Update head if this was the head */
+      if (original_prev == Node::NULL_PTR) {
+        typename node_type::Link_type expected_head = node_link;
+        while (!m_head.compare_exchange_weak(expected_head, original_next, std::memory_order_acq_rel)) {
+          if (expected_head != node_link) break;  /* Head already updated */
+        }
       }
 
-      /* Mark node as removed */
-      if (!node.m_links.compare_exchange_strong(node_links, Node::NULL_LINK, std::memory_order_acq_rel)) [[unlikely]] {
-        continue;
+      /* Step 3: Update tail if this was the tail */
+      if (original_next == Node::NULL_PTR) {
+        typename node_type::Link_type expected_tail = node_link;
+        while (!m_tail.compare_exchange_weak(expected_tail, original_prev, std::memory_order_acq_rel)) {
+          if (expected_tail != node_link) break;  /* Tail already updated */
+        }
       }
 
-      /* Update adjacent nodes */
-      bool success{true};
-
+      /* Step 4: Update prev_node->next to skip this node */
       if (prev_node != nullptr) [[likely]] {
         uint32_t prev_retries{};
         uint64_t prev_links;
@@ -311,65 +390,58 @@ struct List {
 
         do {
           if (prev_retries++ >= Node::MAX_RETRIES) [[unlikely]] {
-            success = false;
-            break;
+            break;  /* Give up but continue - deletion is committed */
           }
 
           prev_link_data = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
 
-          if (prev_links == Node::NULL_LINK) [[unlikely]] {
-            success = false;
-            break;
+          if (prev_links == Node::NULL_LINK || prev_link_data.is_deleting()) [[unlikely]] {
+            break;  /* prev_node also being deleted */
           }
 
-          if (prev_link_data.next != to_link(node)) [[unlikely]] {
-            success = false;
-            break;
+          /* Check if already updated */
+          if (prev_link_data.next != node_link) [[unlikely]] {
+            break;  /* Already updated or something else happened */
           }
 
         } while (!prev_node->m_links.compare_exchange_weak(prev_links,
-                  pack_links(link_data.next, prev_link_data.prev,
+                  pack_links(original_next, prev_link_data.prev,
                             (prev_link_data.next_version + 1) & Node::VERSION_MASK, prev_link_data.prev_version),
                   std::memory_order_acq_rel));
       }
 
-      if (next_node != nullptr && success) [[likely]] {
+      /* Step 5: Update next_node->prev to skip this node */
+      if (next_node != nullptr) [[likely]] {
         uint32_t next_retries{};
         uint64_t next_links;
         Link_pack next_link_data;
 
         do {
           if (next_retries++ >= Node::MAX_RETRIES) [[unlikely]] {
-            success = false;
-            break;
+            break;  /* Give up but continue - deletion is committed */
           }
 
           next_link_data = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
 
-          if (next_links == Node::NULL_LINK) [[unlikely]] {
-            success = false;
-            break;
+          if (next_links == Node::NULL_LINK || next_link_data.is_deleting()) [[unlikely]] {
+            break;  /* next_node also being deleted */
           }
 
-          if (next_link_data.prev != to_link(node)) [[unlikely]] {
-            success = false;
-            break;
+          /* Check if already updated */
+          if (next_link_data.prev != node_link) [[unlikely]] {
+            break;  /* Already updated or something else happened */
           }
 
         } while (!next_node->m_links.compare_exchange_weak(next_links,
-                  pack_links(next_link_data.next, link_data.prev,
+                  pack_links(next_link_data.next, original_prev,
                             next_link_data.next_version, (next_link_data.prev_version + 1) & Node::VERSION_MASK),
                   std::memory_order_acq_rel));
       }
 
-      if (success) {
-        node.invalidate();
-        m_size.fetch_sub(1, std::memory_order_relaxed);
-        return to_item(node);
-      }
+      /* Step 6: Finalize - mark node as fully removed */
+      node.m_links.store(Node::NULL_LINK, std::memory_order_release);
 
-      /* If we failed to update adjacent nodes, try to restore the node */
-      node.m_links.store(node_links, std::memory_order_release);
+      return to_item(node);
     }
 
     /* Failed to remove after max retries */
@@ -496,8 +568,8 @@ struct List {
       auto link_data = unpack_links(node_links);
       auto new_node_link = to_link(new_node);
 
-      if (node_links == Node::NULL_LINK) [[unlikely]] {
-        /* Node was removed */
+      if (node_links == Node::NULL_LINK || link_data.is_deleting()) [[unlikely]] {
+        /* Node was removed or is being deleted */
         new_node.invalidate();
         return false;
       }
@@ -511,6 +583,7 @@ struct List {
             std::memory_order_acq_rel)) [[likely]] {
 
         /* Update next node's prev link if it exists */
+        bool next_updated = true;
         if (link_data.next != Node::NULL_PTR) {
           uint64_t next_links;
           uint32_t next_retries{};
@@ -527,15 +600,17 @@ struct List {
 
             next_link_data = unpack_links(next_links = next_node->m_links.load(std::memory_order_acquire));
 
-            if (next_links == Node::NULL_LINK) [[unlikely]] {
-              /* Next node was removed, restore and retry */
+            if (next_links == Node::NULL_LINK || next_link_data.is_deleting()) [[unlikely]] {
+              /* Next node was removed or being deleted, restore and retry outer loop */
               node.m_links.store(node_links, std::memory_order_release);
+              next_updated = false;
               break;
             }
 
             if (next_link_data.prev != to_link(node)) [[unlikely]] {
-              /* Next node was modified, restore and retry */
+              /* Next node was modified, restore and retry outer loop */
               node.m_links.store(node_links, std::memory_order_release);
+              next_updated = false;
               break;
             }
 
@@ -543,6 +618,10 @@ struct List {
                     pack_links(next_link_data.next, new_node_link,
                               next_link_data.next_version, (next_link_data.prev_version + 1) & Node::VERSION_MASK),
                     std::memory_order_acq_rel));
+
+          if (!next_updated) {
+            continue;  /* Retry outer loop */
+          }
         } else {
           /* Update tail if necessary */
           auto expected_tail = to_link(node);
@@ -568,8 +647,8 @@ struct List {
       auto link_data = unpack_links(node_links);
       auto new_node_link = to_link(new_node);
 
-      if (node_links == Node::NULL_LINK) [[unlikely]] {
-        /* Node was removed */
+      if (node_links == Node::NULL_LINK || link_data.is_deleting()) [[unlikely]] {
+        /* Node was removed or is being deleted */
         new_node.invalidate();
         return false;
       }
@@ -583,6 +662,7 @@ struct List {
             std::memory_order_acq_rel)) [[likely]] {
 
         /* Update prev node's next link if it exists */
+        bool prev_updated = true;
         if (link_data.prev != Node::NULL_PTR) [[likely]] {
           uint64_t prev_links;
           uint32_t prev_retries{};
@@ -599,15 +679,17 @@ struct List {
 
             prev_link_data = unpack_links(prev_links = prev_node->m_links.load(std::memory_order_acquire));
 
-            if (prev_links == Node::NULL_LINK) [[unlikely]] {
-              /* Prev node was removed, restore and retry */
+            if (prev_links == Node::NULL_LINK || prev_link_data.is_deleting()) [[unlikely]] {
+              /* Prev node was removed or being deleted, restore and retry outer loop */
               node.m_links.store(node_links, std::memory_order_release);
+              prev_updated = false;
               break;
             }
 
             if (prev_link_data.next != to_link(node)) [[unlikely]] {
-              /* Prev node was modified, restore and retry */
+              /* Prev node was modified, restore and retry outer loop */
               node.m_links.store(node_links, std::memory_order_release);
+              prev_updated = false;
               break;
             }
 
@@ -615,6 +697,10 @@ struct List {
                     pack_links(new_node_link, prev_link_data.prev,
                               (prev_link_data.next_version + 1) & Node::VERSION_MASK, prev_link_data.prev_version),
                     std::memory_order_acq_rel));
+
+          if (!prev_updated) {
+            continue;  /* Retry outer loop */
+          }
         } else {
           /* Update head if necessary */
           auto expected_head = to_link(node);
@@ -635,27 +721,25 @@ struct List {
     uint32_t retries{};
     typename node_type::Link_type current = m_head.load(std::memory_order_acquire);
 
-    while (current != Node::NULL_PTR && retries++ < Node::MAX_RETRIES) [[likely]] {
+    while (current != Node::NULL_PTR && current != Node::DELETING_MARK && retries++ < Node::MAX_RETRIES) [[likely]] {
       auto node = to_node(current);
       auto item = to_item(*node);
 
-      if (predicate(item)) [[unlikely]] {
-        /* Verify node is still in the list */
-        if (!node->is_null()) {
-          return item;
-        }
-      }
-
       auto links = node->m_links.load(std::memory_order_acquire);
+      auto link_data = unpack_links(links);
 
-      if (links == Node::NULL_LINK) [[unlikely]] {
-        /* Node was removed, try to recover from head */
+      if (links == Node::NULL_LINK || link_data.is_deleting()) [[unlikely]] {
+        /* Node was removed or being deleted, try to recover from head */
         current = m_head.load(std::memory_order_acquire);
         retries++;
         continue;
       }
 
-      current = unpack_links(links).next;
+      if (predicate(item)) [[unlikely]] {
+        return item;
+      }
+
+      current = link_data.next;
     }
 
     return nullptr;
