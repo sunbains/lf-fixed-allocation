@@ -36,8 +36,10 @@ struct Perf_counter {
   }
 
   uint64_t read() {
-    uint64_t count;
-    ::read(m_fd, &count, sizeof(count));
+    uint64_t count{};
+    if (::read(m_fd, &count, sizeof(count)) != sizeof(count)) {
+      return 0;
+    }
     return count;
   }
 
@@ -113,18 +115,27 @@ BENCHMARK_F(List_benchmark, Sequential_operations)(benchmark::State& state) {
     // Perform operations
     for (size_t i = 0; i < 1000; ++i) {
       m_buffer[index] = Test_item(static_cast<int>(i));
-      m_list->push_back(m_buffer[index++]);
+      if (!m_list->push_back(m_buffer[index++])) {
+        state.SkipWithError("push_back failed");
+        return;
+      }
     }
 
     for (size_t i = 0; i < 500; ++i) {
       m_buffer[index] = Test_item(static_cast<int>(i));
-      m_list->push_front(m_buffer[index++]);
+      if (!m_list->push_front(m_buffer[index++])) {
+        state.SkipWithError("push_front failed");
+        return;
+      }
     }
 
     auto it = m_list->begin();
     for (size_t i = 0; i < 250 && it != m_list->end(); ++i, ++it) {
       m_buffer[index] = Test_item(static_cast<int>(i));
-      m_list->insert_after(*it, m_buffer[index++]);
+      if (!m_list->insert_after(*it, m_buffer[index++])) {
+        state.SkipWithError("insert_after failed");
+        return;
+      }
     }
 
     m_cache_misses->stop();

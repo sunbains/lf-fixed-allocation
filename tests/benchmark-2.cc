@@ -53,8 +53,10 @@ public:
   }
 
   uint64_t read() {
-    uint64_t count;
-    ::read(m_fd, &count, sizeof(count));
+    uint64_t count{};
+    if (::read(m_fd, &count, sizeof(count)) != sizeof(count)) {
+      return 0;
+    }
     return count;
   }
 
@@ -127,30 +129,30 @@ BENCHMARK_DEFINE_F(List_benchmark, Mixed_workload)(benchmark::State& state) {
           m_buffer[index] = Test_item(val_dis(gen));
           
           switch (op_dis(gen)) {
-            case 0: // push_back
-              m_list->push_back(m_buffer[index]);
+            case 0: // push_back - may fail under contention
+              if (!m_list->push_back(m_buffer[index])) { /* contention failure */ }
               break;
-              
-            case 1: // push_front
-              m_list->push_front(m_buffer[index]);
+
+            case 1: // push_front - may fail under contention
+              if (!m_list->push_front(m_buffer[index])) { /* contention failure */ }
               break;
-              
+
             case 2: { // insert_after with find
               auto target = m_list->find([val = val_dis(gen)](const Test_item* item) {
                 return item->m_value == val;
               });
               if (target) {
-                m_list->insert_after(*target, m_buffer[index]);
+                if (!m_list->insert_after(*target, m_buffer[index])) { /* contention failure */ }
               }
               break;
             }
-            
+
             case 3: { // remove with find
               auto target = m_list->find([val = val_dis(gen)](const Test_item* item) {
                 return item->m_value == val;
               });
               if (target) {
-                m_list->remove(*target);
+                if (m_list->remove(*target) == nullptr) { /* contention failure */ }
               }
               break;
             }
@@ -202,7 +204,10 @@ BENCHMARK_DEFINE_F(List_benchmark, High_contention)(benchmark::State& state) {
     // Initialize with small set of data for high contention
     for (size_t i = 0; i < 10; ++i) {
       m_buffer[i] = Test_item(static_cast<int>(i));
-      m_list->push_back(m_buffer[i]);
+      if (!m_list->push_back(m_buffer[i])) {
+        state.SkipWithError("Initialization push_back failed");
+        return;
+      }
     }
 
     std::atomic<size_t> next_index{10}; // Start after initial elements
@@ -233,13 +238,13 @@ BENCHMARK_DEFINE_F(List_benchmark, High_contention)(benchmark::State& state) {
           if (target) {
             switch (op_dis(gen)) {
               case 0:
-                m_list->insert_after(*target, m_buffer[index]);
+                if (!m_list->insert_after(*target, m_buffer[index])) { /* contention failure */ }
                 break;
               case 1:
-                m_list->insert_before(*target, m_buffer[index]);
+                if (!m_list->insert_before(*target, m_buffer[index])) { /* contention failure */ }
                 break;
               case 2:
-                m_list->remove(*target);
+                if (m_list->remove(*target) == nullptr) { /* contention failure */ }
                 break;
             }
           }

@@ -46,7 +46,7 @@ TEST_F(Multi_threaded_list_test, concurrent_push_front) {
       for (size_t i = 0; i < ITEMS_PER_THREAD; ++i) {
         size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
         m_buffer[index] = Test_item(static_cast<int>(index));
-        m_list->push_front(m_buffer[index]);
+        EXPECT_TRUE(m_list->push_front(m_buffer[index]));
       }
     });
   }
@@ -81,7 +81,7 @@ TEST_F(Multi_threaded_list_test, concurrent_push_back) {
       for (size_t i = 0; i < ITEMS_PER_THREAD; ++i) {
         size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
         m_buffer[index] = Test_item(static_cast<int>(index));
-        m_list->push_back(m_buffer[index]);
+        EXPECT_TRUE(m_list->push_back(m_buffer[index]));
       }
     });
   }
@@ -116,15 +116,15 @@ TEST_F(Multi_threaded_list_test, mixed_push_front_and_back) {
       std::random_device rd;
       std::mt19937 gen(rd());
       std::uniform_int_distribution<> dis(0, 1);
-      
+
       for (size_t i = 0; i < ITEMS_PER_THREAD; ++i) {
         size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
         m_buffer[index] = Test_item(static_cast<int>(index));
-        
+
         if (dis(gen)) {
-          m_list->push_front(m_buffer[index]);
+          EXPECT_TRUE(m_list->push_front(m_buffer[index]));
         } else {
-          m_list->push_back(m_buffer[index]);
+          EXPECT_TRUE(m_list->push_back(m_buffer[index]));
         }
       }
     });
@@ -157,7 +157,7 @@ TEST_F(Multi_threaded_list_test, concurrent_inserts) {
   constexpr size_t BASE_SIZE = 8;
   for (size_t i = 0; i < BASE_SIZE; ++i) {
     m_buffer[i] = Test_item(static_cast<int>(i * 2)); // Create gaps for insertions
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
     base_indices[0].push_back(m_buffer[i].m_value);
   }
 
@@ -215,7 +215,7 @@ TEST_F(Multi_threaded_list_test, concurrent_mixed_operations) {
   // Initialize with some data
   for (size_t i = 0; i < 100; ++i) {
     m_buffer[i] = Test_item(static_cast<int>(i));
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
   next_index.store(100);
 
@@ -225,17 +225,17 @@ TEST_F(Multi_threaded_list_test, concurrent_mixed_operations) {
       std::random_device rd;
       std::mt19937 gen(rd());
       std::uniform_int_distribution<> op_dis(0, 3); // 4 operations
-      
+
       for (size_t i = 0; i < OPERATIONS_PER_THREAD; ++i) {
         size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
         m_buffer[index] = Test_item(static_cast<int>(index));
-        
+
         switch (op_dis(gen)) {
           case 0:
-            m_list->push_front(m_buffer[index]);
+            EXPECT_TRUE(m_list->push_front(m_buffer[index]));
             break;
           case 1:
-            m_list->push_back(m_buffer[index]);
+            EXPECT_TRUE(m_list->push_back(m_buffer[index]));
             break;
           case 2: {
             // Find random existing item for insert_after
@@ -244,9 +244,9 @@ TEST_F(Multi_threaded_list_test, concurrent_mixed_operations) {
               return item->m_value == target_val;
             });
             if (target) {
-              m_list->insert_after(*target, m_buffer[index]);
+              EXPECT_TRUE(m_list->insert_after(*target, m_buffer[index]));
             } else {
-              m_list->push_back(m_buffer[index]);
+              EXPECT_TRUE(m_list->push_back(m_buffer[index]));
             }
             break;
           }
@@ -257,9 +257,9 @@ TEST_F(Multi_threaded_list_test, concurrent_mixed_operations) {
               return item->m_value == target_val;
             });
             if (target) {
-              m_list->insert_before(*target, m_buffer[index]);
+              EXPECT_TRUE(m_list->insert_before(*target, m_buffer[index]));
             } else {
-              m_list->push_front(m_buffer[index]);
+              EXPECT_TRUE(m_list->push_front(m_buffer[index]));
             }
             break;
           }
@@ -292,7 +292,7 @@ TEST_F(Multi_threaded_list_test, concurrent_iterators) {
   constexpr size_t INITIAL_ITEMS = 1000;
   for (size_t i = 0; i < INITIAL_ITEMS; ++i) {
     m_buffer[i] = Test_item(static_cast<int>(i));
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
 
   constexpr size_t NUM_READER_THREADS = 4;
@@ -300,7 +300,7 @@ TEST_F(Multi_threaded_list_test, concurrent_iterators) {
   std::atomic<bool> stop{false};
   std::atomic<size_t> next_index{INITIAL_ITEMS};
   std::atomic<size_t> iterations_completed{0};
-  
+
   // Create reader threads that continuously iterate
   std::vector<std::thread> reader_threads;
   for (size_t t = 0; t < NUM_READER_THREADS; ++t) {
@@ -323,15 +323,15 @@ TEST_F(Multi_threaded_list_test, concurrent_iterators) {
       std::random_device rd;
       std::mt19937 gen(rd());
       std::uniform_int_distribution<> op_dis(0, 1);
-      
+
       for (size_t i = 0; i < 1000; ++i) {
         size_t index = next_index.fetch_add(1, std::memory_order_relaxed);
         m_buffer[index] = Test_item(static_cast<int>(index));
-        
+
         if (op_dis(gen)) {
-          m_list->push_front(m_buffer[index]);
+          EXPECT_TRUE(m_list->push_front(m_buffer[index]));
         } else {
-          m_list->push_back(m_buffer[index]);
+          EXPECT_TRUE(m_list->push_back(m_buffer[index]));
         }
       }
     });
@@ -374,7 +374,7 @@ TEST_F(Multi_threaded_list_test, concurrent_find_and_modify) {
   constexpr size_t INITIAL_ITEMS = 1000;
   for (size_t i = 0; i < INITIAL_ITEMS; ++i) {
     m_buffer[i] = Test_item(static_cast<int>(i));
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
 
   constexpr size_t NUM_FINDER_THREADS = 4;
@@ -397,7 +397,7 @@ TEST_F(Multi_threaded_list_test, concurrent_find_and_modify) {
         auto result = m_list->find([target_value](const Test_item* item) {
           return item->m_value == target_value;
         });
-        
+
         if (result) {
           finds_completed.fetch_add(1, std::memory_order_relaxed);
         }
@@ -425,23 +425,23 @@ TEST_F(Multi_threaded_list_test, concurrent_find_and_modify) {
 
         switch (op_dis(gen)) {
           case 0:
-            m_list->push_front(m_buffer[index]);
+            EXPECT_TRUE(m_list->push_front(m_buffer[index]));
             break;
           case 1:
-            m_list->push_back(m_buffer[index]);
+            EXPECT_TRUE(m_list->push_back(m_buffer[index]));
             break;
           case 2:
             if (target) {
-              m_list->insert_after(*target, m_buffer[index]);
+              EXPECT_TRUE(m_list->insert_after(*target, m_buffer[index]));
             } else {
-              m_list->push_back(m_buffer[index]);
+              EXPECT_TRUE(m_list->push_back(m_buffer[index]));
             }
             break;
           case 3:
             if (target) {
-              m_list->insert_before(*target, m_buffer[index]);
+              EXPECT_TRUE(m_list->insert_before(*target, m_buffer[index]));
             } else {
-              m_list->push_front(m_buffer[index]);
+              EXPECT_TRUE(m_list->push_front(m_buffer[index]));
             }
             break;
         }
@@ -502,10 +502,10 @@ TEST_F(Multi_threaded_list_test, stress_test) {
 
           switch (op) {
             case 0:
-              m_list->push_front(m_buffer[index]);
+              EXPECT_TRUE(m_list->push_front(m_buffer[index]));
               break;
             case 1:
-              m_list->push_back(m_buffer[index]);
+              EXPECT_TRUE(m_list->push_back(m_buffer[index]));
               break;
             case 2:
             case 3: {
@@ -518,12 +518,12 @@ TEST_F(Multi_threaded_list_test, stress_test) {
 
               if (target) {
                 if (op == 2) {
-                  m_list->insert_after(*target, m_buffer[index]);
+                  EXPECT_TRUE(m_list->insert_after(*target, m_buffer[index]));
                 } else {
-                  m_list->insert_before(*target, m_buffer[index]);
+                  EXPECT_TRUE(m_list->insert_before(*target, m_buffer[index]));
                 }
               } else {
-                m_list->push_back(m_buffer[index]);
+                EXPECT_TRUE(m_list->push_back(m_buffer[index]));
               }
               break;
             }
@@ -603,8 +603,9 @@ TEST_F(Multi_threaded_list_test, concurrent_remove_inconsistency_bug) {
       }
 
       // Try to remove nodes in the middle (indices 3, 4, 5, 6)
+      // In concurrent scenarios, remove may return nullptr if node was already removed
       for (size_t i = 3; i <= 6; ++i) {
-        m_list->remove(m_buffer[i]);
+        (void)m_list->remove(m_buffer[i]);
       }
     });
 
@@ -615,10 +616,11 @@ TEST_F(Multi_threaded_list_test, concurrent_remove_inconsistency_bug) {
       }
 
       // Insert before nodes 4, 5, 6, 7 (these are the "next" nodes when removing 3, 4, 5, 6)
+      // In concurrent scenarios, insert may fail if target node was removed
       for (size_t i = 4; i <= 7; ++i) {
         size_t idx = next_insert_index.fetch_add(1, std::memory_order_relaxed);
         m_buffer[idx] = Test_item(static_cast<int>(idx));
-        m_list->insert_before(m_buffer[i], m_buffer[idx]);
+        (void)m_list->insert_before(m_buffer[i], m_buffer[idx]);
       }
     });
 
@@ -687,7 +689,7 @@ TEST_F(Multi_threaded_list_test, concurrent_remove_and_insert_stress) {
   // Initialize list
   for (size_t i = 0; i < INITIAL_SIZE; ++i) {
     m_buffer[i] = Test_item(static_cast<int>(i));
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
 
   std::atomic<size_t> next_index{INITIAL_SIZE};
@@ -706,7 +708,7 @@ TEST_F(Multi_threaded_list_test, concurrent_remove_and_insert_stress) {
 
       for (size_t i = 0; i < OPERATIONS_PER_THREAD && !stop.load(std::memory_order_relaxed); ++i) {
         int target = dis(gen);
-        if (m_list->remove(m_buffer[target])) {
+        if (m_list->remove(m_buffer[target]) != nullptr) {
           successful_removes.fetch_add(1, std::memory_order_relaxed);
         }
       }
@@ -735,10 +737,12 @@ TEST_F(Multi_threaded_list_test, concurrent_remove_and_insert_stress) {
         }
 
         if (!success) {
-          // Target was removed, fall back to push_back
-          m_list->push_back(m_buffer[idx]);
+          // Target was removed, fall back to push_back (may also fail under contention)
+          success = m_list->push_back(m_buffer[idx]);
         }
-        successful_inserts.fetch_add(1, std::memory_order_relaxed);
+        if (success) {
+          successful_inserts.fetch_add(1, std::memory_order_relaxed);
+        }
       }
     });
   }

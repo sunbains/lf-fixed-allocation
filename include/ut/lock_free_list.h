@@ -39,18 +39,18 @@ struct Node {
     return *this;
   }
 
-  bool is_null() const noexcept {
+  [[nodiscard]] bool is_null() const noexcept {
     return m_links.load(std::memory_order_relaxed) == NULL_LINK;
   }
 
-  bool is_deleting() const noexcept {
+  [[nodiscard]] bool is_deleting() const noexcept {
     auto links = m_links.load(std::memory_order_acquire);
     if (links == NULL_LINK) return false;
     auto next = static_cast<Link_type>((links >> (VERSION_BITS_PER_LINK + LINK_BITS + VERSION_BITS_PER_LINK)) & ((1u << LINK_BITS) - 1));
     return next == DELETING_MARK;
   }
 
-  bool is_removed_or_deleting() const noexcept {
+  [[nodiscard]] bool is_removed_or_deleting() const noexcept {
     auto links = m_links.load(std::memory_order_acquire);
     if (links == NULL_LINK) return true;
     auto next = static_cast<Link_type>((links >> (VERSION_BITS_PER_LINK + LINK_BITS + VERSION_BITS_PER_LINK)) & ((1u << LINK_BITS) - 1));
@@ -70,7 +70,7 @@ struct Node {
   std::atomic<uint64_t> m_links{NULL_LINK};
 };
 
-inline constexpr uint64_t pack_links(Node::Link_type next, Node::Link_type prev, Node::Version_type next_version, Node::Version_type prev_version) noexcept {
+[[nodiscard]] inline constexpr uint64_t pack_links(Node::Link_type next, Node::Link_type prev, Node::Version_type next_version, Node::Version_type prev_version) noexcept {
   constexpr uint32_t LINK_MASK = (1u << Node::LINK_BITS) - 1;
   constexpr uint32_t PREV_VERSION_BITS = Node::VERSION_BITS_PER_LINK;
   constexpr uint32_t PREV_LINK_SHIFT = PREV_VERSION_BITS;
@@ -89,12 +89,12 @@ struct Link_pack {
   Node::Version_type next_version;
   Node::Version_type prev_version;
 
-  bool is_deleting() const noexcept {
+  [[nodiscard]] bool is_deleting() const noexcept {
     return next == Node::DELETING_MARK;
   }
 };
 
-inline Link_pack unpack_links(uint64_t links) noexcept {
+[[nodiscard]] inline Link_pack unpack_links(uint64_t links) noexcept {
   constexpr uint32_t LINK_MASK = (1u << Node::LINK_BITS) - 1;
   constexpr uint32_t PREV_VERSION_BITS = Node::VERSION_BITS_PER_LINK;
   constexpr uint32_t PREV_LINK_SHIFT = PREV_VERSION_BITS;
@@ -209,7 +209,7 @@ struct List_iterator {
     return *this;
   }
 
-  List_iterator operator++(int) noexcept {
+  [[nodiscard]] List_iterator operator++(int) noexcept {
     List_iterator tmp = *this;
     ++(*this);
     return tmp;
@@ -258,7 +258,7 @@ struct List_iterator {
     return *this;
   }
 
-  List_iterator operator--(int) noexcept {
+  [[nodiscard]] List_iterator operator--(int) noexcept {
     List_iterator tmp = *this;
     --(*this);
     return tmp;
@@ -325,7 +325,7 @@ struct List {
     return &const_cast<item_pointer>(m_bounds.first)[link];
   }
 
-  item_pointer remove(item_reference item) noexcept {
+  [[nodiscard]] item_pointer remove(item_reference item) noexcept {
     uint32_t retries{};
     auto& node = (item.*N)();
 
@@ -448,7 +448,7 @@ struct List {
     return nullptr;
   }
 
-  bool push_front(item_reference item) noexcept {
+  [[nodiscard]] bool push_front(item_reference item) noexcept {
     uint32_t retries{};
     auto& node = (item.*N)();
 
@@ -501,7 +501,7 @@ struct List {
     return false;
   }
 
-  bool push_back(item_reference item) noexcept {
+  [[nodiscard]] bool push_back(item_reference item) noexcept {
     uint32_t retries{};
     auto& node = (item.*N)();
 
@@ -553,7 +553,7 @@ struct List {
     return false;
   }
 
-  bool insert_after(item_reference item, item_reference new_item) noexcept {
+  [[nodiscard]] bool insert_after(item_reference item, item_reference new_item) noexcept {
     auto& node = (item.*N)();
 
     if (node.is_null()) {
@@ -637,7 +637,7 @@ struct List {
     return false;
   }
 
-  bool insert_before(item_reference item, item_reference new_item) noexcept {
+  [[nodiscard]] bool insert_before(item_reference item, item_reference new_item) noexcept {
     uint32_t retries{};
     auto& node = (item.*N)();
     auto& new_node = (new_item.*N)();
@@ -823,7 +823,7 @@ struct List {
 
 #if UT_DEBUG
   /* Validation helper */
-  bool validate_node_links(const node_type& node) const noexcept {
+  [[nodiscard]] bool validate_node_links(const node_type& node) const noexcept {
     auto links = node.m_links.load(std::memory_order_acquire);
 
     if (links == Node::NULL_LINK) [[likely]] {

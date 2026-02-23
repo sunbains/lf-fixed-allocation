@@ -82,7 +82,10 @@ int main() {
   data[3] = User_data(4, "Delhi");
   
   for (int i{}; i < 4; ++i) {
-    list->push_back(data[i]);
+    if (!list->push_back(data[i])) {
+      std::cerr << "Failed to push element " << i << "\n";
+      return 1;
+    }
   }
 
   std::cout << "1. Basic Iterator Usage\n" << std::string(50, '-') << "\n";

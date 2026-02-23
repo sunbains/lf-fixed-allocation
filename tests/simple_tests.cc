@@ -37,8 +37,8 @@ TEST_F(List_test, empty_list_iterators) {
 
 TEST_F(List_test, push_front_single_element) {
   m_buffer[0] = Test_item(42);
-  m_list->push_front(m_buffer[0]);
-  
+  ASSERT_TRUE(m_list->push_front(m_buffer[0]));
+
   auto it = m_list->begin();
   EXPECT_NE(it, m_list->end());
   EXPECT_EQ(it->m_value, 42);
@@ -48,8 +48,8 @@ TEST_F(List_test, push_front_single_element) {
 
 TEST_F(List_test, push_back_single_element) {
   m_buffer[0] = Test_item(42);
-  m_list->push_back(m_buffer[0]);
-  
+  ASSERT_TRUE(m_list->push_back(m_buffer[0]));
+
   auto it = m_list->begin();
   EXPECT_NE(it, m_list->end());
   EXPECT_EQ(it->m_value, 42);
@@ -62,9 +62,9 @@ TEST_F(List_test, multiple_push_front) {
   
   for (size_t i = 0; i < values.size(); ++i) {
     m_buffer[i] = Test_item(values[i]);
-    m_list->push_front(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_front(m_buffer[i]));
   }
-  
+
   std::vector<int> expected = {5, 4, 3, 2, 1};
   std::vector<int> actual;
   
@@ -80,14 +80,14 @@ TEST_F(List_test, multiple_push_back) {
   
   for (size_t i = 0; i < values.size(); ++i) {
     m_buffer[i] = Test_item(values[i]);
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
-  
+
   std::vector<int> actual;
   for (const auto& item : *m_list) {
     actual.push_back(item.m_value);
   }
-  
+
   EXPECT_EQ(actual, values);
 }
 
@@ -96,16 +96,16 @@ TEST_F(List_test, reverse_iteration) {
   
   for (size_t i = 0; i < values.size(); ++i) {
     m_buffer[i] = Test_item(values[i]);
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
-  
+
   std::vector<int> expected = {5, 4, 3, 2, 1};
   std::vector<int> actual;
-  
+
   for (auto it = m_list->rbegin(); it != m_list->rend(); ++it) {
     actual.push_back(it->m_value);
   }
-  
+
   EXPECT_EQ(actual, expected);
 }
 
@@ -114,14 +114,14 @@ TEST_F(List_test, insert_after) {
   m_buffer[0] = Test_item(1);
   m_buffer[1] = Test_item(2);
   m_buffer[2] = Test_item(4);
-  
-  m_list->push_back(m_buffer[0]);
-  m_list->push_back(m_buffer[1]);
-  m_list->push_back(m_buffer[2]);
-  
+
+  ASSERT_TRUE(m_list->push_back(m_buffer[0]));
+  ASSERT_TRUE(m_list->push_back(m_buffer[1]));
+  ASSERT_TRUE(m_list->push_back(m_buffer[2]));
+
   // Insert 3 after 2
   m_buffer[3] = Test_item(3);
-  m_list->insert_after(m_buffer[1], m_buffer[3]);
+  ASSERT_TRUE(m_list->insert_after(m_buffer[1], m_buffer[3]));
   
   std::vector<int> expected = {1, 2, 3, 4};
   std::vector<int> actual;
@@ -138,14 +138,14 @@ TEST_F(List_test, insert_before) {
   m_buffer[0] = Test_item(1);
   m_buffer[1] = Test_item(2);
   m_buffer[2] = Test_item(4);
-  
-  m_list->push_back(m_buffer[0]);
-  m_list->push_back(m_buffer[1]);
-  m_list->push_back(m_buffer[2]);
-  
+
+  ASSERT_TRUE(m_list->push_back(m_buffer[0]));
+  ASSERT_TRUE(m_list->push_back(m_buffer[1]));
+  ASSERT_TRUE(m_list->push_back(m_buffer[2]));
+
   // Insert 3 before 4
   m_buffer[3] = Test_item(3);
-  m_list->insert_before(m_buffer[2], m_buffer[3]);
+  ASSERT_TRUE(m_list->insert_before(m_buffer[2], m_buffer[3]));
   
   std::vector<int> expected = {1, 2, 3, 4};
   std::vector<int> actual;
@@ -159,12 +159,12 @@ TEST_F(List_test, insert_before) {
 
 TEST_F(List_test, find_existing_element) {
   std::vector<int> values = {1, 2, 3, 4, 5};
-  
+
   for (size_t i = 0; i < values.size(); ++i) {
     m_buffer[i] = Test_item(values[i]);
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
-  
+
   auto result = m_list->find([](const Test_item* item) {
     return item->m_value == 3;
   });
@@ -175,12 +175,12 @@ TEST_F(List_test, find_existing_element) {
 
 TEST_F(List_test, find_non_existing_element) {
   std::vector<int> values = {1, 2, 3, 4, 5};
-  
+
   for (size_t i = 0; i < values.size(); ++i) {
     m_buffer[i] = Test_item(values[i]);
-    m_list->push_back(m_buffer[i]);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
   }
-  
+
   auto result = m_list->find([](const Test_item* item) {
     return item->m_value == 42;
   });
@@ -199,7 +199,7 @@ TEST_F(List_test, concurrent_push_back) {
       for (size_t i = 0; i < ITEMS_PER_THREAD; ++i) {
         size_t index = t * ITEMS_PER_THREAD + i;
         m_buffer[index] = Test_item(static_cast<int>(index));
-        m_list->push_back(m_buffer[index]);
+        EXPECT_TRUE(m_list->push_back(m_buffer[index]));
       }
     });
   }
@@ -229,26 +229,26 @@ TEST_F(List_test, size_tracking) {
 
   // Test push_front increments size
   m_buffer[0] = Test_item(1);
-  m_list->push_front(m_buffer[0]);
+  ASSERT_TRUE(m_list->push_front(m_buffer[0]));
   EXPECT_EQ(m_list->size(), 1);
 
   // Test push_back increments size
   m_buffer[1] = Test_item(2);
-  m_list->push_back(m_buffer[1]);
+  ASSERT_TRUE(m_list->push_back(m_buffer[1]));
   EXPECT_EQ(m_list->size(), 2);
 
   // Test insert_after increments size
   m_buffer[2] = Test_item(3);
-  m_list->insert_after(m_buffer[0], m_buffer[2]);
+  ASSERT_TRUE(m_list->insert_after(m_buffer[0], m_buffer[2]));
   EXPECT_EQ(m_list->size(), 3);
 
   // Test insert_before increments size
   m_buffer[3] = Test_item(4);
-  m_list->insert_before(m_buffer[1], m_buffer[3]);
+  ASSERT_TRUE(m_list->insert_before(m_buffer[1], m_buffer[3]));
   EXPECT_EQ(m_list->size(), 4);
 
   // Test remove decrements size
-  m_list->remove(m_buffer[2]);
+  ASSERT_NE(m_list->remove(m_buffer[2]), nullptr);
   EXPECT_EQ(m_list->size(), 3);
 
   // Test pop_front decrements size
