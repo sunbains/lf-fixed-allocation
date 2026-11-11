@@ -1,5 +1,10 @@
 # Iterator Race Condition Analysis
 
+> **Superseded.** This document analyses the original algorithm (both links
+> packed into one word, no helping), which was not correct under concurrency
+> and has been replaced. It is kept for reference only. The current algorithm
+> is described in [lock-free-list-design.md](lock-free-list-design.md).
+
 ## 1. Iterator Structure and State
 
 ```cpp

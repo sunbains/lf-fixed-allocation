@@ -4,22 +4,28 @@ A high-performance lock-free doubly linked list implementation in modern C++. Th
 
 ## Features
 
-- **Lock-free Operations**: All operations are lock-free, ensuring threads never block
-- **Thread Safety**: Full thread-safe implementation for concurrent access
-- **ABA Problem Prevention**: Uses 64-bit CAS combining next/prev pointers to prevent ABA issues
-- **Memory Efficient**: No additional memory overhead per node beyond the required links
-- **STL Compatible**: Provides standard bidirectional iterator interface
-- **Modern C++**: Written in modern C++23 with clear, maintainable code
+- **Lock-free Operations**: No locks; a thread that stalls in the middle of an operation never blocks the others, they complete its work for it
+- **Linearizable**: Every mutating operation and `find()` takes effect atomically at a single compare-and-swap
+- **Recyclable Nodes**: Items can be removed and re-inserted any number of times; every CAS target carries a modification tag to rule out ABA
+- **Memory Efficient**: 16 bytes per node, no allocation, nodes are addressed by their index in a user provided buffer
+- **Bidirectional Iteration**: Weakly consistent forward and reverse iterators
+- **Modern C++**: Written in C++23
 
 ## Operations
 
-- `push_front()`: Add element to the front of the list
-- `push_back()`: Add element to the back of the list
-- `insert_after()`: Insert element after a given node
-- `insert_before()`: Insert element before a given node
-- `remove()`: Remove an element from the list
-- `find()`: Find an element using a predicate
-- Bidirectional iteration support
+- `push_front()`, `push_back()`: Add an item at either end
+- `insert_after()`, `insert_before()`: Insert an item next to one that is in the list; returns `false` if it is not
+- `remove()`: Remove an item; returns `nullptr` if it is not in the list
+- `pop_front()`, `pop_back()`: Remove and return the item at either end
+- `find()`: Find an item using a predicate
+- `size()`: Number of items (exact when no operation is in progress)
+- Bidirectional iteration
+
+When `remove()` or `pop_*()` return an item, the caller owns it exclusively and
+can re-insert it right away. Inserting an item that is already in a list fails.
+
+Iterators are weakly consistent. If the element that an iterator points to is
+removed concurrently, advancing the iterator throws `ut::Iterator_invalidated`.
 
 ## Usage
 
@@ -55,17 +61,32 @@ for (const auto& data : list) {
 
 ## Performance
 
-The implementation is designed for high performance in concurrent scenarios:
+- **Lock-free Design**: No mutex contention or blocking
+- **No Allocation**: The list works on a buffer that the user provides
+- **O(1) Operations**: At both ends and next to a known item. The prev links are hints that are validated against the next links; a search from the head is only needed if another thread stalls in the middle of an operation
+- **Scales Where a List Can**: Operations on different parts of the list don't share cache lines (the item count is striped per thread) and scale with the number of threads. Operations on the same end of the list all need the same link; there the list uses randomized exponential backoff to keep the throughput steady instead of collapsing
+- **Sequentially Consistent Atomics**: The algorithm relies on a total order of the atomic operations on the links
 
-- **Lock-free Design**: No mutex contentions or blocking
-- **Cache-friendly**: Minimizes false sharing and cache line bouncing
-- **Efficient Memory Usage**: No dynamic allocations during operations
-- **Optimized CAS Operations**: Minimizes the number of CAS operations required
-- **Retry Limits**: Prevents theoretical infinite loops in high contention
+Throughput in million operations per second on a 2 x 24 core Xeon Platinum 8260, 65536 items (`./bin/benchmark-scaling`), compared with a plain doubly linked list protected by a `std::mutex`:
+
+| Workload | Threads | Lock-free | Mutex |
+|---|---|---|---|
+| `middle`: remove + insert_after at random positions | 1 | 20 | 38 |
+| | 16 | 59 | 1.5 |
+| | 64 | 83 | 1.4 |
+| `before`: remove + insert_before at random positions | 1 | 18 | 39 |
+| | 64 | 84 | 1.9 |
+| `lru`: remove at a random position + push_front | 1 | 22 | 47 |
+| | 64 | 4.3 | 1.8 |
+| `queue`: pop_front + push_back | 1 | 24 | 45 |
+| | 64 | 1.2 | 2.0 |
+
+A single list is the wrong tool for 64 threads that all work on the same end: use several lists.
 
 ### Benchmarks
 
-The repository includes comprehensive benchmarks measuring:
+The repository includes benchmarks measuring:
+- Thread scaling against a mutex protected list (`benchmark-scaling`)
 - Operation throughput
 - Cache misses
 - Branch prediction misses
@@ -83,17 +104,34 @@ The repository includes comprehensive benchmarks measuring:
 
 ### Build Instructions
 
-All binary files will be added to the bin/ directory. Make sure it exists.
+All binary files will be added to the bin/ directory.
 
 ```bash
-mkdir build && cd build
-cmake ..
-make
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build -j
 
-# Run tests and benchmarks
-./bin/<binary_name>
-
+./bin/simple_tests   # single threaded unit tests
+./bin/mt_tests       # stress tests with real threads
+./bin/dst_tests      # deterministic simulation + property based tests
 ```
+
+### Deterministic Simulation Tests
+
+`dst_tests` compiles the list against an instrumented atomic
+(`tests/sim/sim.h`) and runs randomly generated concurrent programs under
+randomly generated, but fully reproducible, schedules. Every atomic access is
+a scheduling point. Each run is checked for linearizability against a
+sequential model, and for a number of structural invariants. Failures are
+shrunk to a minimal program and printed with the seed that reproduces them.
+
+```bash
+LF_DST_SEED=12345 ./bin/dst_tests       # a different part of the search space
+LF_DST_CASES=1000000 ./bin/dst_tests    # more programs per property
+LF_DST_TRACE=1 ./bin/dst_tests          # print every atomic step of a failing run
+```
+
+See [docs/lock-free-list-design.md](docs/lock-free-list-design.md) for the
+algorithm and the properties that are tested.
 
 ### CMake Integration
 
@@ -104,27 +142,23 @@ target_link_libraries(your_target PRIVATE ut::lock_free_list)
 
 ## Implementation Details
 
-The implementation uses several key techniques to achieve lock-free operation:
+See [docs/lock-free-list-design.md](docs/lock-free-list-design.md). In short:
 
-1. **Combined Link Storage**:
-   - Both next and prev pointers are packed into a single 64-bit integer
-   - Enables atomic updates of both links simultaneously
-   - Prevents ABA problems without generation counting
+1. **The next links are the truth**: A node is in the list if it is reachable
+   from the head via next links, and every operation takes effect with one CAS
+   on one next link. Deletion marks the node first and unlinks it afterwards;
+   any thread that runs into a marked node unlinks it.
 
-2. **Memory Management**:
-   - User-provided buffer for node storage
-   - No dynamic allocation during operations
-   - Clear ownership semantics
+2. **The prev links are hints**: They are repaired after every change and are
+   exact when the list is quiescent, but they are always validated against the
+   next links before they are used.
 
-3. **Atomic Operations**:
-   - Uses C++23 atomic operations
-   - Carefully chosen memory orderings for performance
-   - Minimized number of CAS operations
+3. **Tags**: Each link word carries a counter that is incremented on every
+   modification and survives removal and re-insertion of the node, so a
+   successful CAS proves that the word was not modified in between.
 
-4. **Iterator Safety**:
-   - Handles concurrent modifications
-   - Recovers from removed nodes
-   - Provides consistent traversal semantics
+4. **Memory Management**: User-provided buffer for node storage, no dynamic
+   allocation, links are 30 bit indexes.
 
 ## Contributing
 
@@ -132,7 +166,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ### Before submitting a PR:
 
-1. Ensure all tests pass
+1. Ensure all tests pass, including `dst_tests`
 2. Run benchmarks to verify performance
 3. Add tests for new functionality
 4. Follow the existing code style

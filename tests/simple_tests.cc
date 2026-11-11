@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <thread>
 #include <vector>
 
@@ -267,3 +268,143 @@ TEST_F(List_test, size_tracking) {
   EXPECT_EQ(m_list->size(), 0);
 }
 
+
+TEST_F(List_test, insert_item_twice_fails) {
+  m_buffer[0] = Test_item(1);
+  m_buffer[1] = Test_item(2);
+
+  ASSERT_TRUE(m_list->push_back(m_buffer[0]));
+  EXPECT_FALSE(m_list->push_back(m_buffer[0]));
+  EXPECT_FALSE(m_list->push_front(m_buffer[0]));
+  EXPECT_FALSE(m_list->insert_after(m_buffer[0], m_buffer[0]));
+
+  ASSERT_TRUE(m_list->push_back(m_buffer[1]));
+  EXPECT_FALSE(m_list->insert_before(m_buffer[0], m_buffer[1]));
+  EXPECT_EQ(m_list->size(), 2U);
+}
+
+TEST_F(List_test, operations_on_item_not_in_list) {
+  m_buffer[0] = Test_item(1);
+  m_buffer[1] = Test_item(2);
+
+  EXPECT_EQ(m_list->remove(m_buffer[0]), nullptr);
+  EXPECT_FALSE(m_list->insert_after(m_buffer[0], m_buffer[1]));
+  EXPECT_FALSE(m_list->insert_before(m_buffer[0], m_buffer[1]));
+  EXPECT_EQ(m_list->pop_front(), nullptr);
+  EXPECT_EQ(m_list->pop_back(), nullptr);
+
+  /* A failed insert must leave the new item free. */
+  EXPECT_TRUE(m_buffer[1].m_node.is_null());
+  EXPECT_TRUE(m_list->push_back(m_buffer[1]));
+}
+
+TEST_F(List_test, remove_and_reinsert) {
+  for (int i = 0; i < 4; ++i) {
+    m_buffer[i] = Test_item(i);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
+  }
+
+  for (int round = 0; round < 100; ++round) {
+    /* Rotate: [a, b, c, d] -> [b, c, d, a] */
+    auto item = m_list->pop_front();
+    ASSERT_NE(item, nullptr);
+    EXPECT_TRUE(item->m_node.is_null());
+    ASSERT_TRUE(m_list->push_back(*item));
+
+    /* Move the second item behind the third. */
+    auto it = m_list->begin();
+    auto& second = *++it;
+    auto& third = *++it;
+
+    ASSERT_EQ(m_list->remove(second), &second);
+    ASSERT_TRUE(m_list->insert_after(third, second));
+  }
+
+  std::vector<int> forward;
+  std::vector<int> backward;
+
+  for (const auto& item : *m_list) {
+    forward.push_back(item.m_value);
+  }
+  for (auto it = m_list->rbegin(); it != m_list->rend(); ++it) {
+    backward.push_back(it->m_value);
+  }
+
+  std::reverse(backward.begin(), backward.end());
+  EXPECT_EQ(forward, backward);
+  EXPECT_EQ(forward.size(), 4U);
+  EXPECT_EQ(m_list->size(), 4U);
+}
+
+TEST_F(List_test, pop_front_and_back_order) {
+  for (int i = 0; i < 5; ++i) {
+    m_buffer[i] = Test_item(i);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
+  }
+
+  EXPECT_EQ(m_list->pop_front()->m_value, 0);
+  EXPECT_EQ(m_list->pop_back()->m_value, 4);
+  EXPECT_EQ(m_list->pop_front()->m_value, 1);
+  EXPECT_EQ(m_list->pop_back()->m_value, 3);
+  EXPECT_EQ(m_list->pop_back()->m_value, 2);
+  EXPECT_EQ(m_list->pop_back(), nullptr);
+  EXPECT_EQ(m_list->size(), 0U);
+  EXPECT_EQ(m_list->begin(), m_list->end());
+  EXPECT_EQ(m_list->rbegin(), m_list->rend());
+}
+
+TEST_F(List_test, bidirectional_iterator_steps) {
+  for (int i = 0; i < 3; ++i) {
+    m_buffer[i] = Test_item(i);
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
+  }
+
+  auto it = m_list->end();
+  EXPECT_EQ((--it)->m_value, 2);
+  EXPECT_EQ((--it)->m_value, 1);
+  EXPECT_EQ((--it)->m_value, 0);
+  EXPECT_EQ(it, m_list->begin());
+
+  /* Decrementing begin() is a no-op. */
+  EXPECT_EQ(--it, m_list->begin());
+
+  auto rit = m_list->rbegin();
+  EXPECT_EQ(rit->m_value, 2);
+  EXPECT_EQ((++rit)->m_value, 1);
+  EXPECT_EQ((--rit)->m_value, 2);
+
+  ut::List<Test_item, &Test_item::node>::const_iterator cit = m_list->begin();
+  EXPECT_EQ(cit->m_value, 0);
+}
+
+TEST_F(List_test, assigning_to_a_linked_item_keeps_it_linked) {
+  m_buffer[0] = Test_item(1);
+  m_buffer[1] = Test_item(2);
+  ASSERT_TRUE(m_list->push_back(m_buffer[0]));
+  ASSERT_TRUE(m_list->push_back(m_buffer[1]));
+
+  /* The value changes, the position in the list doesn't. */
+  m_buffer[0] = Test_item(42);
+  EXPECT_FALSE(m_buffer[0].m_node.is_null());
+
+  std::vector<int> values;
+  for (const auto& item : *m_list) {
+    values.push_back(item.m_value);
+  }
+  EXPECT_EQ(values, (std::vector<int>{42, 2}));
+
+  /* A copy of a linked item is not linked. */
+  Test_item copy = m_buffer[0];
+  EXPECT_TRUE(copy.m_node.is_null());
+}
+
+TEST_F(List_test, advancing_iterator_of_removed_item_throws) {
+  m_buffer[0] = Test_item(1);
+  m_buffer[1] = Test_item(2);
+  ASSERT_TRUE(m_list->push_back(m_buffer[0]));
+  ASSERT_TRUE(m_list->push_back(m_buffer[1]));
+
+  auto it = m_list->begin();
+  ASSERT_EQ(m_list->remove(m_buffer[0]), &m_buffer[0]);
+  EXPECT_THROW(++it, ut::Iterator_invalidated);
+}

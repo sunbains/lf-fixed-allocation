@@ -779,3 +779,112 @@ TEST_F(Multi_threaded_list_test, concurrent_remove_and_insert_stress) {
       << "BUG DETECTED: Forward and backward traversals found different nodes!";
 }
 
+// Items are continuously removed and re-inserted by all the threads, the way
+// a free list or an LRU would use the list. Every item must end up either in
+// the list or in the hands of exactly one thread.
+template <typename List, typename Buffer>
+void recycle_stress(List& m_list, Buffer& m_buffer, const size_t NUM_THREADS, const size_t NUM_ITEMS, const size_t OPERATIONS_PER_THREAD) {
+
+  for (size_t i = 0; i < NUM_ITEMS; ++i) {
+    m_buffer[i] = Test_item(static_cast<int>(i));
+    ASSERT_TRUE(m_list->push_back(m_buffer[i]));
+  }
+
+  std::vector<std::vector<Test_item*>> owned(NUM_THREADS);
+  std::vector<std::thread> threads;
+
+  for (size_t t = 0; t < NUM_THREADS; ++t) {
+    threads.emplace_back([&, t]() {
+      std::mt19937 gen(static_cast<uint32_t>(t + 1));
+      std::uniform_int_distribution<size_t> item_dis(0, NUM_ITEMS - 1);
+      std::uniform_int_distribution<int> op_dis(0, 9);
+      auto& mine = owned[t];
+
+      for (size_t i = 0; i < OPERATIONS_PER_THREAD; ++i) {
+        auto& target = m_buffer[item_dis(gen)];
+        const auto op = op_dis(gen);
+
+        if (op < 5 && !mine.empty()) {
+          auto item = mine.back();
+          bool inserted{};
+
+          switch (op) {
+            case 0: inserted = m_list->push_front(*item); break;
+            case 1: inserted = m_list->push_back(*item); break;
+            case 2: inserted = m_list->insert_after(target, *item); break;
+            case 3: inserted = m_list->insert_before(target, *item); break;
+            default: inserted = m_list->push_back(*item); break;
+          }
+
+          /* The push of an item that we own can't fail. */
+          if (op != 2 && op != 3) {
+            EXPECT_TRUE(inserted);
+          }
+          if (inserted) {
+            mine.pop_back();
+          }
+        } else {
+          Test_item* item{};
+
+          switch (op % 3) {
+            case 0: item = m_list->pop_front(); break;
+            case 1: item = m_list->pop_back(); break;
+            default: item = m_list->remove(target); break;
+          }
+
+          if (item != nullptr) {
+            mine.push_back(item);
+          }
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  std::vector<int> count(NUM_ITEMS, 0);
+  std::vector<int> forward_values;
+  std::vector<int> backward_values;
+
+  for (const auto& item : *m_list) {
+    forward_values.push_back(item.m_value);
+    ASSERT_LE(forward_values.size(), NUM_ITEMS) << "Cycle in forward traversal";
+    ++count[item.m_value];
+  }
+
+  for (auto it = m_list->rbegin(); it != m_list->rend(); ++it) {
+    backward_values.push_back(it->m_value);
+    ASSERT_LE(backward_values.size(), NUM_ITEMS) << "Cycle in backward traversal";
+  }
+
+  std::reverse(backward_values.begin(), backward_values.end());
+  EXPECT_EQ(forward_values, backward_values);
+  EXPECT_EQ(m_list->size(), forward_values.size());
+
+  for (const auto& mine : owned) {
+    for (auto item : mine) {
+      EXPECT_TRUE(item->m_node.is_null());
+      ++count[item->m_value];
+    }
+  }
+
+  for (size_t i = 0; i < NUM_ITEMS; ++i) {
+    EXPECT_EQ(count[i], 1) << "Item " << i << " was lost or duplicated";
+  }
+}
+
+TEST_F(Multi_threaded_list_test, recycle_stress) {
+  recycle_stress(m_list, m_buffer, 8, 64, 200000);
+}
+
+// Many more threads than items: everything collides with everything.
+TEST_F(Multi_threaded_list_test, recycle_stress_64_threads_small_list) {
+  recycle_stress(m_list, m_buffer, 64, 48, 50000);
+}
+
+// The configuration that is meant to scale: 64 threads, large list.
+TEST_F(Multi_threaded_list_test, recycle_stress_64_threads_large_list) {
+  recycle_stress(m_list, m_buffer, 64, 16384, 100000);
+}
